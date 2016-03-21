@@ -1,0 +1,14 @@
+{application, gen_rets,
+ [
+  {description, "An Erlang gen_rets library"},
+  {vsn, "1"},
+  {modules, [
+             gen_rets
+            ]},
+  {registered, []},
+  {applications, [
+                  kernel,
+                  stdlib
+                 ]},
+  {env, []}
+ ]}.
