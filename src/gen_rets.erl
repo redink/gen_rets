@@ -101,11 +101,11 @@ start_link(Options) ->
 %%%===================================================================
 
 init([Options]) ->
-    ExpireMode    = proplists:get_value(expire_mode   , Options, fifo),
-    MaxSize       = proplists:get_value(max_size      , Options, 100000),
-    HighWaterSize = proplists:get_value(highwater_size, Options, 70000),
-    MaxMem = get_mem_limit(proplists:get_value(max_mem, Options, {gb, 2})),
-    HighWaterMem = get_mem_limit(proplists:get_value(highwater_mem, Options, {gb, 1.5})),
+    ExpireMode    = get_list_item(expire_mode   , Options, fifo),
+    MaxSize       = get_list_item(max_size      , Options, 100000),
+    HighWaterSize = get_list_item(highwater_size, Options, 70000),
+    MaxMem = get_mem_limit(get_list_item(max_mem, Options, {gb, 2})),
+    HighWaterMem = get_mem_limit(get_list_item(highwater_mem, Options, {gb, 1.5})),
     erlang:send_after(timer:seconds(10), erlang:self(), ttl_clean),
     {ok, #{ expire_mode => ExpireMode
           , max_mem     => MaxMem
@@ -246,7 +246,7 @@ handle_call({reset_ttl, Key, Time}, _From,
     end;
 
 handle_call(_Request, _From, State) ->
-    {reply, ok, State, ?HIBERNATE_TIMEOUT}.
+    {reply, unsupported, State, ?HIBERNATE_TIMEOUT}.
 
 %%--------------------------------------------------------------------
 handle_cast(_Msg, State) ->
@@ -461,7 +461,7 @@ clean_other_table_via_key(OriginKey, ServerState) ->
     ok.
 
 get_object_key(NewETSOptions, Object) ->
-    element(proplists:get_value(keypos, NewETSOptions, 1), Object).
+    element(get_list_item(keypos, NewETSOptions, 1), Object).
 
 get_ttl_time({sec, Num}, Now) ->
     Now + Num;
@@ -473,6 +473,21 @@ get_ttl_time({hour, Num}, Now) ->
 get_now() ->
     {X1, X2, _} = os:timestamp(),
     X1 * 1000000 + X2.
+
+% get_list_item(Key, PorpLORMap) ->
+%     get_list_item(Key, PorpLORMap, undefined).
+
+get_list_item(Key, PorpLORMap, Default) when erlang:is_list(PorpLORMap) ->
+    case lists:keyfind(Key, 1, PorpLORMap) of
+        {Key, Value} ->
+            Value;
+        _ ->
+            Default
+    end;
+get_list_item(Key, PorpLORMap, Default) when erlang:is_map(PorpLORMap) ->
+    maps:get(Key, PorpLORMap, Default);
+get_list_item(_, _, Default) ->
+    Default.
 
 
 -ifdef(TEST).

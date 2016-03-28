@@ -1,0 +1,8 @@
+language: erlang
+notifications:
+  email: false
+otp_release:
+  - 18.2
+  - 18.1
+  - 17.4
+script: "make clean && make eunit && make clean && make xref"
