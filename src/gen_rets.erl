@@ -21,6 +21,8 @@
         , delete_object/2
         , delete_all_objects/1
         , lookup/2
+        , update_counter/3
+        , update_counter/5
         , get_ttl/2
         , reset_ttl/3
         ]).
@@ -81,6 +83,12 @@ delete_all_objects(ServerPid) ->
 -spec lookup(pid() | atom(), term()) -> [tuple()].
 lookup(ServerPid, Key) ->
     gen_server:call(ServerPid, {lookup, Key}).
+
+update_counter(ServerPid, Key, UpdateOp) ->
+    gen_server:call(ServerPid, {update_counter, Key, UpdateOp}).
+update_counter(ServerPid, Key, UpdateOp, Default, TTLOption) ->
+    gen_server:call(ServerPid, {update_counter, Key, UpdateOp,
+                                Default, TTLOption}).
 
 -spec get_ttl(pid() | atom(), term()) -> integer().
 get_ttl(ServerPid, Key) ->
@@ -212,6 +220,52 @@ handle_call({lookup, Key}, _From,
                     _ ->
                         update_lru_time(Now, Key, State),
                         ets:lookup(MainTable, Key)
+                end,
+            {reply, Return, State, ?HIBERNATE_TIMEOUT}
+    end;
+
+handle_call({update_counter, Key, UpdateOp}, _From,
+            #{ets_meta_table := MetaTable,
+              ets_main_table := MainTable} = State) ->
+    case ets:lookup(MetaTable, Key) of
+        [] ->
+            {reply, not_found,
+             State, ?HIBERNATE_TIMEOUT};
+        [{Key, TTLTime, _, _}] ->
+            Now = get_now(),
+            Return =
+                case Now > TTLTime of
+                    true ->
+                        clean_other_table_via_key(Key, State),
+                        true = ets:delete(MainTable, Key),
+                        not_found;
+                    _ ->
+                        update_lru_time(Now, Key, State),
+                        ets:update_counter(MainTable, Key, UpdateOp)
+                end,
+            {reply, Return, State, ?HIBERNATE_TIMEOUT}
+    end;
+
+handle_call({update_counter, Key, UpdateOp, Default, TTLOption}, _From,
+            #{ets_meta_table := MetaTable,
+              ets_main_table := MainTable} = State) ->
+    case ets:lookup(MetaTable, Key) of
+        [] ->
+            ok   = set_ttl(Default, State, TTLOption),
+            true = ets:insert(MainTable, Default),
+            R    = ets:update_counter(MainTable, Key, UpdateOp),
+            {reply, R, State, ?HIBERNATE_TIMEOUT};
+        [{Key, TTLTime, _, _}] ->
+            Now = get_now(),
+            Return =
+                case Now > TTLTime of
+                    true ->
+                        clean_other_table_via_key(Key, State),
+                        true = ets:delete(MainTable, Key),
+                        not_found;
+                    _ ->
+                        update_lru_time(Now, Key, State),
+                        ets:update_counter(MainTable, Key, UpdateOp)
                 end,
             {reply, Return, State, ?HIBERNATE_TIMEOUT}
     end;
@@ -774,6 +828,70 @@ gen_rets_test_() ->
             ?assertEqual([], ets:tab2list(LRUTable)),
             ?assertEqual(true, gen_rets:delete(Pid))
         end}
+    , {"update_counter/3",
+        fun() ->
+            {ok, Pid} = gen_rets:start_link([]),
+            gen_rets:new(Pid, test_for_ets, []),
+            'update_counter_test/3'(Pid),
+            ?assertEqual(true, gen_rets:delete(Pid))
+        end}
+    , {"update_counter/4",
+        fun() ->
+            {ok, Pid} = gen_rets:start_link([]),
+            gen_rets:new(Pid, test_for_ets, []),
+            '18_update_counter_test/4'(Pid),
+            ?assertEqual(true, gen_rets:delete(Pid))
+        end}
     ].
+
+'update_counter_test/3'(Pid) ->
+    ?assertEqual(true, gen_rets:insert(Pid, {"redink", 26, "coder"}, {sec, 10})),
+    gen_rets:update_counter(Pid, "redink", {2, 1}),
+    ?assertEqual([{"redink", 27, "coder"}], gen_rets:lookup(Pid, "redink")),
+    ?assertEqual(true, gen_rets:delete(Pid, "redink")),
+
+    ?assertEqual(true, gen_rets:insert(Pid, {"redink", 26}, {sec, 10})),
+    gen_rets:update_counter(Pid, "redink", 1),
+    ?assertEqual([{"redink", 27}], gen_rets:lookup(Pid, "redink")),
+    ?assertEqual(true, gen_rets:delete(Pid, "redink")),
+
+    ?assertEqual(true, gen_rets:insert(Pid, {"redink", 26, 1}, {sec, 10})),
+    gen_rets:update_counter(Pid, "redink", [{2, 1}, {3, 11, 10, 3}]),
+    ?assertEqual([{"redink", 27, 3}], gen_rets:lookup(Pid, "redink")),
+    ?assertEqual(true, gen_rets:delete(Pid, "redink")),
+
+    ?assertEqual(not_found, gen_rets:update_counter(Pid, "redink", {2, 1})),
+
+    ?assertEqual(true, gen_rets:insert(Pid, {"redink", 26}, {sec, 1})),
+    timer:sleep(timer:seconds(2)),
+    ?assertEqual(not_found, gen_rets:update_counter(Pid, "redink", {2, 1})),
+    ok.
+
+'18_update_counter_test/4'(Pid) ->
+    gen_rets:update_counter(Pid, "redink", {2, 1}, {"redink", 26, "coder"}, {sec, 10}),
+    ?assertEqual([{"redink", 27, "coder"}], gen_rets:lookup(Pid, "redink")),
+    ?assertEqual(true, 10 - gen_rets:get_ttl(Pid, "redink") =< 1),
+    ?assertEqual(true, gen_rets:delete(Pid, "redink")),
+
+    gen_rets:update_counter(Pid, "redink", 1, {"redink", 26}, {sec, 10}),
+    ?assertEqual([{"redink", 27}], gen_rets:lookup(Pid, "redink")),
+    ?assertEqual(true, 10 - gen_rets:get_ttl(Pid, "redink") =< 1),
+    ?assertEqual(true, gen_rets:delete(Pid, "redink")),
+
+    gen_rets:update_counter(Pid, "redink", [{2, 1}, {3, 11, 10, 3}],
+                            {"redink", 26, 1}, {sec, 10}),
+    ?assertEqual([{"redink", 27, 3}], gen_rets:lookup(Pid, "redink")),
+    ?assertEqual(true, gen_rets:delete(Pid, "redink")),
+
+    ?assertEqual(true, gen_rets:insert(Pid, {"redink", 26}, {sec, 10})),
+    gen_rets:update_counter(Pid, "redink", 1, {"redink", 1}, {sec, 10}),
+    ?assertEqual([{"redink", 27}], gen_rets:lookup(Pid, "redink")),
+    ?assertEqual(true, gen_rets:delete(Pid, "redink")),
+
+    ?assertEqual(true, gen_rets:insert(Pid, {"redink", 26}, {sec, 1})),
+    timer:sleep(timer:seconds(2)),
+    ?assertEqual(not_found, gen_rets:update_counter(Pid, "redink", {2, 1},
+                                                    {"redink", 1}, {sec, 1})),
+    ok.
 
 -endif.
