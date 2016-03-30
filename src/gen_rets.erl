@@ -14,6 +14,7 @@
 -export([ start_link/1
         , get_ets/1
         , new/3
+        , insert/2
         , insert/3
         , insert_new/3
         , delete/1
@@ -25,6 +26,11 @@
         , update_counter/5
         , get_ttl/2
         , reset_ttl/3
+        , subscribe/1
+        ]).
+
+-export([ get_list_item/2
+        , get_list_item/3
         ]).
 
 %% gen_server callbacks
@@ -32,6 +38,13 @@
          terminate/2, code_change/3]).
 -define(SERVER, ?MODULE).
 -define(HIBERNATE_TIMEOUT, 10000).
+-define(MAXTTLTIME, {hour, 24 * 365 * 100}).
+
+-ifdef(TEST).
+-define(DELETEKEYTABLELIMIT, 2).
+-else.
+-define(DELETEKEYTABLELIMIT, 10).
+-endif.
 
 % -callback
 
@@ -47,6 +60,10 @@ new(ServerPid, Name, Options) ->
 -spec get_ets(pid() | atom()) -> ets:tid() | atom().
 get_ets(ServerPid) ->
     gen_server:call(ServerPid, get_ets).
+
+-spec insert(pid() | atom(), tuple() | [tuple()]) -> boolean().
+insert(ServerPid, Objects) ->
+    insert(ServerPid, Objects, ?MAXTTLTIME).
 
 -spec insert(pid() | atom(), tuple() | [tuple()],
              {sec, integer()} |
@@ -101,8 +118,17 @@ get_ttl(ServerPid, Key) ->
 reset_ttl(ServerPid, Key, TTLOption) ->
     gen_server:call(ServerPid, {reset_ttl, Key, TTLOption}).
 
+-spec subscribe(pid() | atom()) -> ok.
+subscribe(ServerPid) ->
+    gen_server:call(ServerPid, {subscribe, erlang:self()}).
+
 start_link(Options) ->
-    gen_server:start_link(?MODULE, [Options], []).
+    case get_list_item(name, Options, -1) of
+        Name when erlang:is_atom(Name) ->
+            gen_server:start_link({local, Name}, ?MODULE, [Options], []);
+        _ ->
+            gen_server:start_link(?MODULE, [Options], [])
+    end.
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -112,14 +138,17 @@ init([Options]) ->
     ExpireMode    = get_list_item(expire_mode   , Options, fifo),
     MaxSize       = get_list_item(max_size      , Options, 100000),
     HighWaterSize = get_list_item(highwater_size, Options, 70000),
-    MaxMem = get_mem_limit(get_list_item(max_mem, Options, {gb, 2})),
-    HighWaterMem = get_mem_limit(get_list_item(highwater_mem, Options, {gb, 1.5})),
-    erlang:send_after(timer:seconds(10), erlang:self(), ttl_clean),
+    MaxMem        = get_mem_limit(get_list_item(max_mem, Options, {gb, 2})),
+    HighWaterMem  = get_mem_limit(get_list_item(highwater_mem, Options, {gb, 1.5})),
+    {sec, TimeInterval} = get_list_item(check_ttl_interval, Options, {sec, 10}),
+    erlang:send_after(timer:seconds(TimeInterval), erlang:self(), ttl_clean),
     {ok, #{ expire_mode => ExpireMode
           , max_mem     => MaxMem
           , max_size    => MaxSize
           , highwater_mem  => HighWaterMem
           , highwater_size => HighWaterSize
+          , deleted_key_table  => ets:new(deleted_key_table, [])
+          , check_ttl_interval => TimeInterval
           }, ?HIBERNATE_TIMEOUT}.
 
 %%--------------------------------------------------------------------
@@ -299,6 +328,11 @@ handle_call({reset_ttl, Key, Time}, _From,
             {reply, true, State, ?HIBERNATE_TIMEOUT}
     end;
 
+handle_call({subscribe, Subscriber}, _From, State) ->
+    OldSubscribeList = maps:get(subscribe_list, State, []),
+    {reply, ok, State#{subscribe_list => [Subscriber | OldSubscribeList]},
+     ?HIBERNATE_TIMEOUT};
+
 handle_call(_Request, _From, State) ->
     {reply, unsupported, State, ?HIBERNATE_TIMEOUT}.
 
@@ -308,13 +342,14 @@ handle_cast(_Msg, State) ->
 
 %%--------------------------------------------------------------------
 
-handle_info(ttl_clean, State) ->
+handle_info(ttl_clean, #{check_ttl_interval := TimeInterval} = State) ->
     case maps:get(ets_main_table, State, -1) of
         -1 ->
             ignore;
         _ ->
             ok = clean_unuse_via_ttl(State),
-            erlang:send_after(timer:seconds(10), erlang:self(), ttl_clean)
+            erlang:send_after(timer:seconds(TimeInterval),
+                              erlang:self(), ttl_clean)
     end,
     {noreply, State, ?HIBERNATE_TIMEOUT};
 
@@ -371,7 +406,8 @@ handle_info({refresh_main_table_via_size, HighWaterSize},
     {noreply, State, ?HIBERNATE_TIMEOUT};
 
 handle_info({refresh_main_table_via_mem, HighWaterMem},
-            #{expire_mode := ExpireMode, ets_main_table := MainTable} = State) ->
+            #{ expire_mode := ExpireMode
+             , ets_main_table := MainTable} = State) ->
     case {ets:info(MainTable, memory) > HighWaterMem, ExpireMode} of
         {true, lru} ->
             clean_single_key_via_lru(State),
@@ -382,6 +418,30 @@ handle_info({refresh_main_table_via_mem, HighWaterMem},
         _ ->
             ignore
     end,
+    {noreply, State, ?HIBERNATE_TIMEOUT};
+
+handle_info({log_deleted_key, DeleteKey}, State) ->
+    DeleteKeyTable = maps:get(deleted_key_table, State),
+    ets:insert(DeleteKeyTable, {DeleteKey, nouse}),
+    NewTimeoutRef =
+        case {ets:info(DeleteKeyTable, size) >= ?DELETEKEYTABLELIMIT,
+              maps:get(timeout_ref, State, -1)} of
+            {false, -1} ->
+                erlang:send_after(timer:seconds(1), erlang:self(), notify_subscriber);
+            {false, OldTimeoutRef} ->
+                OldTimeoutRef;
+            % {true, -1} ->
+            %     ok = notify_subscriber(State),
+            %     -1;
+            {true, OldTimeoutRef} ->
+                ok = notify_subscriber(State),
+                _  = erlang:cancel_timer(OldTimeoutRef),
+                erlang:send_after(timer:seconds(1), erlang:self(), notify_subscriber)
+        end,
+    {noreply, State#{timeout_ref => NewTimeoutRef}, ?HIBERNATE_TIMEOUT};
+
+handle_info(notify_subscriber, State) ->
+    ok = notify_subscriber(State),
     {noreply, State, ?HIBERNATE_TIMEOUT};
 
 handle_info(timeout, State) ->
@@ -403,6 +463,19 @@ code_change(_OldVsn, State, _Extra) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
+
+notify_subscriber(ServerState) ->
+    DeleteKeyTable = maps:get(deleted_key_table, ServerState),
+    case maps:get(subscribe_list, ServerState, []) of
+        [] ->
+            ignore;
+        SubscribeList ->
+            DeleteKeyList = [X || {X, _} <- ets:tab2list(DeleteKeyTable)],
+            [erlang:send(X, {auto_deleted, DeleteKeyList})
+             || X <- SubscribeList]
+    end,
+    ets:delete_all_objects(DeleteKeyTable),
+    ok.
 
 get_mem_limit({gb, Num}) ->
     erlang:trunc(Num * 1024 * 1024 * 1024 / 8);
@@ -512,6 +585,7 @@ clean_other_table_via_key(OriginKey, ServerState) ->
     true = ets:delete(TTLTable , {TTLTime, OriginKey}),
     true = ets:delete(FIFOTable, {InsertTime, OriginKey}),
     true = ets:delete(LRUTable , {UpdateTime, OriginKey}),
+    erlang:send(erlang:self(), {log_deleted_key, OriginKey}),
     ok.
 
 get_object_key(NewETSOptions, Object) ->
@@ -528,8 +602,8 @@ get_now() ->
     {X1, X2, _} = os:timestamp(),
     X1 * 1000000 + X2.
 
-% get_list_item(Key, PorpLORMap) ->
-%     get_list_item(Key, PorpLORMap, undefined).
+get_list_item(Key, PorpLORMap) ->
+    get_list_item(Key, PorpLORMap, undefined).
 
 get_list_item(Key, PorpLORMap, Default) when erlang:is_list(PorpLORMap) ->
     case lists:keyfind(Key, 1, PorpLORMap) of
@@ -610,20 +684,46 @@ gen_rets_test_() ->
         fun() ->
             {ok, Pid} = gen_rets:start_link([]),
             gen_rets:new(Pid, test_for_ets, []),
+            ?assertEqual(ok, gen_rets:subscribe(Pid)),
             gen_rets:insert(Pid, {akey, avalue}, {sec, 3}),
             timer:sleep(timer:seconds(11)),
             ?assertEqual([], gen_rets:lookup(Pid, akey)),
+            receive
+                {auto_deleted, KL} ->
+                    ?assertEqual([akey], KL)
+            end,
             ?assertEqual(true, gen_rets:delete(Pid))
         end}
     , {"auto ttl 2", timeout, 20,
         fun() ->
             {ok, Pid} = gen_rets:start_link([]),
             gen_rets:new(Pid, test_for_ets, []),
+            ?assertEqual(ok, gen_rets:subscribe(Pid)),
             gen_rets:insert(Pid, {akey, avalue}, {sec, 3}),
             gen_rets:insert(Pid, {bkey, bvalue}, {sec, 15}),
             timer:sleep(timer:seconds(11)),
             ?assertEqual([], gen_rets:lookup(Pid, akey)),
             ?assertEqual([{bkey, bvalue}], gen_rets:lookup(Pid, bkey)),
+            receive
+                {auto_deleted, KL} ->
+                    ?assertEqual([akey], KL)
+            end,
+            ?assertEqual(true, gen_rets:delete(Pid))
+        end}
+    , {"auto ttl 3", timeout, 20,
+        fun() ->
+            {ok, Pid} = gen_rets:start_link([]),
+            gen_rets:new(Pid, test_for_ets, []),
+            ?assertEqual(ok, gen_rets:subscribe(Pid)),
+            gen_rets:insert(Pid, {akey, avalue}, {sec, 3}),
+            gen_rets:insert(Pid, {bkey, bvalue}, {sec, 3}),
+            timer:sleep(timer:seconds(11)),
+            ?assertEqual([], gen_rets:lookup(Pid, akey)),
+            ?assertEqual([], gen_rets:lookup(Pid, bkey)),
+            receive
+                {auto_deleted, KL} ->
+                    ?assertEqual([akey, bkey], lists:sort(KL))
+            end,
             ?assertEqual(true, gen_rets:delete(Pid))
         end}
     , {"get ttl",
