@@ -175,6 +175,7 @@ handle_call({insert, Objects, TTLOption}, _From,
             #{ets_main_table := MainTable} = State) ->
     true = ets:insert(MainTable, Objects),
     ok   = set_ttl(Objects, State, TTLOption),
+    %% trigger log
     erlang:send(erlang:self(), refresh_main_table),
     {reply, true, State, ?HIBERNATE_TIMEOUT};
 
@@ -183,6 +184,7 @@ handle_call({insert_new, Objects, TTLOption}, _From,
     case ets:insert_new(MainTable, Objects) of
         true ->
             ok = set_ttl(Objects, State, TTLOption),
+            %% trigger log
             erlang:send(erlang:self(), refresh_main_table),
             {reply, true, State, ?HIBERNATE_TIMEOUT};
         false ->
@@ -190,6 +192,7 @@ handle_call({insert_new, Objects, TTLOption}, _From,
     end;
 
 handle_call(delete, _From, State) ->
+    %% trigger log
     {stop, normal, true, State};
 
 handle_call({delete, Key}, _From,
@@ -200,6 +203,7 @@ handle_call({delete, Key}, _From,
         _ ->
             ok   = clean_other_table_via_key(Key, State),
             true = ets:delete(MainTable, Key)
+            %% trigger log
     end,
     {reply, true, State, ?HIBERNATE_TIMEOUT};
 
@@ -213,8 +217,10 @@ handle_call({delete_object, Object}, _From,
         [_] ->
             ok = clean_other_table_via_key(Key, State),
             ets:delete_object(MainTable, Object);
+            %% trigger log
         [_ | _] ->
             ets:delete_object(MainTable, Object)
+            %% trigger log
     end,
     {reply, true, State, ?HIBERNATE_TIMEOUT};
 
@@ -229,6 +235,7 @@ handle_call(delete_all_objects, _From,
     true = ets:delete_all_objects(FIFOTable),
     true = ets:delete_all_objects(LRUTable ),
     true = ets:delete_all_objects(MainTable),
+    %% trigger log ************
     {reply, true, State, ?HIBERNATE_TIMEOUT};
 
 handle_call({lookup, Key}, _From,
@@ -245,6 +252,7 @@ handle_call({lookup, Key}, _From,
                     true ->
                         clean_other_table_via_key(Key, State), 
                         true = ets:delete(MainTable, Key),
+                        %% trigger log
                         [];
                     _ ->
                         update_lru_time(Now, Key, State),
@@ -267,10 +275,12 @@ handle_call({update_counter, Key, UpdateOp}, _From,
                     true ->
                         clean_other_table_via_key(Key, State),
                         true = ets:delete(MainTable, Key),
+                        %% trigger log
                         not_found;
                     _ ->
                         update_lru_time(Now, Key, State),
                         ets:update_counter(MainTable, Key, UpdateOp)
+                        %% trigger log
                 end,
             {reply, Return, State, ?HIBERNATE_TIMEOUT}
     end;
@@ -283,6 +293,7 @@ handle_call({update_counter, Key, UpdateOp, Default, TTLOption}, _From,
             ok   = set_ttl(Default, State, TTLOption),
             true = ets:insert(MainTable, Default),
             R    = ets:update_counter(MainTable, Key, UpdateOp),
+            %% trigger log
             {reply, R, State, ?HIBERNATE_TIMEOUT};
         [{Key, TTLTime, _, _}] ->
             Now = get_now(),
@@ -291,10 +302,12 @@ handle_call({update_counter, Key, UpdateOp, Default, TTLOption}, _From,
                     true ->
                         clean_other_table_via_key(Key, State),
                         true = ets:delete(MainTable, Key),
+                        %% trigger log
                         not_found;
                     _ ->
                         update_lru_time(Now, Key, State),
                         ets:update_counter(MainTable, Key, UpdateOp)
+                        %% trigger log
                 end,
             {reply, Return, State, ?HIBERNATE_TIMEOUT}
     end;
@@ -325,6 +338,7 @@ handle_call({reset_ttl, Key, Time}, _From,
             true = ets:insert(TTLTable, {{TTLTime, Key}, nouse}),
             true = ets:insert(LRUTable, {{Now, Key}, nouse}),
             true = ets:insert(MetaTable, {Key, TTLTime, OldInsertTime, Now}),
+            %% trigger log
             {reply, true, State, ?HIBERNATE_TIMEOUT}
     end;
 
@@ -544,6 +558,7 @@ clean_unuse_via_ttl({TTLTime, OriginKey} = Key, TTLTable,
         true ->
             ok   = clean_other_table_via_key(OriginKey, ServerState),
             true = ets:delete(MainTable, OriginKey),
+            %% trigger log
             clean_unuse_via_ttl(ets:next(TTLTable, Key), TTLTable,
                                 ServerState);
         false ->
@@ -559,6 +574,7 @@ clean_single_key_via_fifo(ServerState) ->
         {_, Key} ->
             ok = clean_other_table_via_key(Key, ServerState),
             true = ets:delete(MainTable, Key)
+            %% trigger log
     end,
     ServerState.
 
@@ -571,6 +587,7 @@ clean_single_key_via_lru(ServerState) ->
         {_, Key} ->
             ok = clean_other_table_via_key(Key, ServerState),
             true = ets:delete(MainTable, Key)
+            %% trigger log
     end,
     ServerState.
 
