@@ -20,4 +20,4 @@ xref: deps compile
 	$(REBAR) xref
 
 eunit: deps compile
-	$(REBAR) eunit -v
+	$(REBAR) skip_deps=true eunit -v

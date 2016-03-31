@@ -12,8 +12,8 @@
 
 %% API
 -export([ start_link/1
+        , start/1
         , get_ets/1
-        , new/3
         , insert/2
         , insert/3
         , insert_new/3
@@ -31,6 +31,11 @@
 
 -export([ get_list_item/2
         , get_list_item/3
+        , set_ttl/4
+        , clean_other_table_via_key/3
+        , get_object_key/2
+        , get_ttl_time/2
+        , get_now/0
         ]).
 
 %% gen_server callbacks
@@ -53,9 +58,6 @@
 %%%===================================================================
 
 %%--------------------------------------------------------------------
--spec new(pid() | atom(), atom(), list()) -> ets:tid() | atom().
-new(ServerPid, Name, Options) ->
-    gen_server:call(ServerPid, {new, Name, Options}).
 
 -spec get_ets(pid() | atom()) -> ets:tid() | atom().
 get_ets(ServerPid) ->
@@ -130,6 +132,14 @@ start_link(Options) ->
             gen_server:start_link(?MODULE, [Options], [])
     end.
 
+start(Options) ->
+    case get_list_item(name, Options, -1) of
+        Name when erlang:is_atom(Name) ->
+            gen_server:start({local, Name}, ?MODULE, [Options], []);
+        _ ->
+            gen_server:start(?MODULE, [Options], [])
+    end.
+
 %%%===================================================================
 %%% gen_server callbacks
 %%%===================================================================
@@ -141,32 +151,84 @@ init([Options]) ->
     MaxMem        = get_mem_limit(get_list_item(max_mem, Options, {gb, 2})),
     HighWaterMem  = get_mem_limit(get_list_item(highwater_mem, Options, {gb, 1.5})),
     {sec, TimeInterval} = get_list_item(check_ttl_interval, Options, {sec, 10}),
-    erlang:send_after(timer:seconds(TimeInterval), erlang:self(), ttl_clean),
-    {ok, #{ expire_mode => ExpireMode
-          , max_mem     => MaxMem
-          , max_size    => MaxSize
-          , highwater_mem  => HighWaterMem
-          , highwater_size => HighWaterSize
-          , deleted_key_table  => ets:new(deleted_key_table, [])
-          , check_ttl_interval => TimeInterval
-          }, ?HIBERNATE_TIMEOUT}.
+    %% new ets table
+    EtsTableName  = get_list_item(ets_table_name , Options),
+    NewETSOptions = get_list_item(new_ets_options, Options, []),
+    case {lists:member(named_table, NewETSOptions),
+          get_list_item(persistence, Options, false),
+          lists:member(public, NewETSOptions)} of
+        {true, false, _} ->
+            MetaTable = ets:new(ets_meta_table, [public, set, compressed]),
+            TTLTable  = ets:new(ets_ttl_table , [public, ordered_set, compressed]),
+            FIFOTable = ets:new(ets_fifo_table, [public, ordered_set, compressed]),
+            LRUTable  = ets:new(ets_lru_table , [public, ordered_set, compressed]),
+            MainTable = ets:new(EtsTableName, NewETSOptions),
+            erlang:send_after(timer:seconds(TimeInterval), erlang:self(), ttl_clean),
+            {ok, #{ expire_mode => ExpireMode
+                  , max_mem     => MaxMem
+                  , max_size    => MaxSize
+                  , highwater_mem  => HighWaterMem
+                  , highwater_size => HighWaterSize
+                  , deleted_key_table  => ets:new(deleted_key_table, [])
+                  , check_ttl_interval => TimeInterval
+                  , ets_main_table  => MainTable
+                  , ets_meta_table  => MetaTable
+                  , ets_ttl_table   => TTLTable
+                  , ets_fifo_table  => FIFOTable
+                  , ets_lru_table   => LRUTable
+                  , new_ets_options => NewETSOptions
+                  }, ?HIBERNATE_TIMEOUT};
+        {true, aof, true} ->
+            MetaTable = ets:new(ets_meta_table, [public, set, compressed]),
+            TTLTable  = ets:new(ets_ttl_table , [public, ordered_set, compressed]),
+            FIFOTable = ets:new(ets_fifo_table, [public, ordered_set, compressed]),
+            LRUTable  = ets:new(ets_lru_table , [public, ordered_set, compressed]),
+            MainTable = ets:new(EtsTableName, NewETSOptions),
+            State     = #{ expire_mode => ExpireMode
+                         , max_mem     => MaxMem
+                         , max_size    => MaxSize
+                         , highwater_mem  => HighWaterMem
+                         , highwater_size => HighWaterSize
+                         , deleted_key_table  => ets:new(deleted_key_table, [])
+                         , check_ttl_interval => TimeInterval
+                         , ets_main_table  => MainTable
+                         , ets_meta_table  => MetaTable
+                         , ets_ttl_table   => TTLTable
+                         , ets_fifo_table  => FIFOTable
+                         , ets_lru_table   => LRUTable
+                         , new_ets_options => NewETSOptions
+                         },
+            {ok, AOFPid} = rets_aof:start_link([{ets_table_name, EtsTableName},
+                                                {server_state, State}]),
+            erlang:send_after(timer:seconds(TimeInterval), erlang:self(), ttl_clean),
+            erlang:send(erlang:self(), refresh_main_table),
+            {ok, State#{ aof_pid => AOFPid}, ?HIBERNATE_TIMEOUT};
+        {false, false, _} ->
+            MetaTable = ets:new(ets_meta_table, [public, set, compressed]),
+            TTLTable  = ets:new(ets_ttl_table , [public, ordered_set, compressed]),
+            FIFOTable = ets:new(ets_fifo_table, [public, ordered_set, compressed]),
+            LRUTable  = ets:new(ets_lru_table , [public, ordered_set, compressed]),
+            MainTable = ets:new(EtsTableName, NewETSOptions),
+            erlang:send_after(timer:seconds(TimeInterval), erlang:self(), ttl_clean),
+            {ok, #{ expire_mode => ExpireMode
+                  , max_mem     => MaxMem
+                  , max_size    => MaxSize
+                  , highwater_mem  => HighWaterMem
+                  , highwater_size => HighWaterSize
+                  , deleted_key_table  => ets:new(deleted_key_table, [])
+                  , check_ttl_interval => TimeInterval
+                  , ets_main_table     => MainTable
+                  , ets_meta_table     => MetaTable
+                  , ets_ttl_table      => TTLTable
+                  , ets_fifo_table     => FIFOTable
+                  , ets_lru_table      => LRUTable
+                  , new_ets_options    => NewETSOptions
+                  }, ?HIBERNATE_TIMEOUT};
+        _ ->
+            {stop, "aof should named table or public"}
+    end.
 
 %%--------------------------------------------------------------------
-handle_call({new, Name, Options}, _From, State) ->
-    MetaTable = ets:new(ets_meta_table, [public, set, compressed]),
-    TTLTable  = ets:new(ets_ttl_table , [public, ordered_set, compressed]),
-    FIFOTable = ets:new(ets_fifo_table, [public, ordered_set, compressed]),
-    LRUTable  = ets:new(ets_lru_table , [public, ordered_set, compressed]),
-    MainTable = ets:new(Name, Options),
-    {reply, MainTable,
-     State#{ ets_main_table  => MainTable
-           , ets_meta_table  => MetaTable
-           , ets_ttl_table   => TTLTable
-           , ets_fifo_table  => FIFOTable
-           , ets_lru_table   => LRUTable
-           , new_ets_options => Options
-           },
-     ?HIBERNATE_TIMEOUT};
 
 handle_call(get_ets, _From, #{ets_main_table := MainTable} = State) ->
     {reply, MainTable, State, ?HIBERNATE_TIMEOUT};
@@ -175,24 +237,26 @@ handle_call({insert, Objects, TTLOption}, _From,
             #{ets_main_table := MainTable} = State) ->
     true = ets:insert(MainTable, Objects),
     ok   = set_ttl(Objects, State, TTLOption),
-    %% trigger log
+    ok   = trigger_aof(State, insert, [get_now(), Objects, TTLOption]),
     erlang:send(erlang:self(), refresh_main_table),
     {reply, true, State, ?HIBERNATE_TIMEOUT};
 
 handle_call({insert_new, Objects, TTLOption}, _From,
             #{ets_main_table := MainTable} = State) ->
-    case ets:insert_new(MainTable, Objects) of
-        true ->
-            ok = set_ttl(Objects, State, TTLOption),
-            %% trigger log
-            erlang:send(erlang:self(), refresh_main_table),
-            {reply, true, State, ?HIBERNATE_TIMEOUT};
-        false ->
-            {reply, false, State, ?HIBERNATE_TIMEOUT}
-    end;
+    R =
+        case ets:insert_new(MainTable, Objects) of
+            true ->
+                ok = set_ttl(Objects, State, TTLOption),
+                erlang:send(erlang:self(), refresh_main_table),
+                {reply, true, State, ?HIBERNATE_TIMEOUT};
+            false ->
+                {reply, false, State, ?HIBERNATE_TIMEOUT}
+        end,
+    ok = trigger_aof(State, insert_new, [get_now(), Objects, TTLOption]),
+    R;
 
 handle_call(delete, _From, State) ->
-    %% trigger log
+    ok = trigger_aof(State, clean_aof_log, []),
     {stop, normal, true, State};
 
 handle_call({delete, Key}, _From,
@@ -203,8 +267,8 @@ handle_call({delete, Key}, _From,
         _ ->
             ok   = clean_other_table_via_key(Key, State),
             true = ets:delete(MainTable, Key)
-            %% trigger log
     end,
+    ok = trigger_aof(State, delete, [Key]),
     {reply, true, State, ?HIBERNATE_TIMEOUT};
 
 handle_call({delete_object, Object}, _From,
@@ -217,11 +281,10 @@ handle_call({delete_object, Object}, _From,
         [_] ->
             ok = clean_other_table_via_key(Key, State),
             ets:delete_object(MainTable, Object);
-            %% trigger log
         [_ | _] ->
             ets:delete_object(MainTable, Object)
-            %% trigger log
     end,
+    ok = trigger_aof(State, delete_object, [Object]),
     {reply, true, State, ?HIBERNATE_TIMEOUT};
 
 handle_call(delete_all_objects, _From,
@@ -235,7 +298,7 @@ handle_call(delete_all_objects, _From,
     true = ets:delete_all_objects(FIFOTable),
     true = ets:delete_all_objects(LRUTable ),
     true = ets:delete_all_objects(MainTable),
-    %% trigger log ************
+    ok   = trigger_aof(State, clean_aof_log, []),
     {reply, true, State, ?HIBERNATE_TIMEOUT};
 
 handle_call({lookup, Key}, _From,
@@ -250,12 +313,13 @@ handle_call({lookup, Key}, _From,
             Return =
                 case Now > TTLTime of
                     true ->
-                        clean_other_table_via_key(Key, State), 
+                        clean_other_table_via_key(Key, State),
                         true = ets:delete(MainTable, Key),
-                        %% trigger log
+                        ok   = trigger_aof(State, delete, [Key]),
                         [];
                     _ ->
                         update_lru_time(Now, Key, State),
+                        %% TODO trigger aof for update lru
                         ets:lookup(MainTable, Key)
                 end,
             {reply, Return, State, ?HIBERNATE_TIMEOUT}
@@ -264,53 +328,56 @@ handle_call({lookup, Key}, _From,
 handle_call({update_counter, Key, UpdateOp}, _From,
             #{ets_meta_table := MetaTable,
               ets_main_table := MainTable} = State) ->
-    case ets:lookup(MetaTable, Key) of
-        [] ->
-            {reply, not_found,
-             State, ?HIBERNATE_TIMEOUT};
-        [{Key, TTLTime, _, _}] ->
-            Now = get_now(),
-            Return =
-                case Now > TTLTime of
-                    true ->
-                        clean_other_table_via_key(Key, State),
-                        true = ets:delete(MainTable, Key),
-                        %% trigger log
-                        not_found;
-                    _ ->
-                        update_lru_time(Now, Key, State),
-                        ets:update_counter(MainTable, Key, UpdateOp)
-                        %% trigger log
-                end,
-            {reply, Return, State, ?HIBERNATE_TIMEOUT}
-    end;
+    R =
+        case ets:lookup(MetaTable, Key) of
+            [] ->
+                {reply, not_found,
+                 State, ?HIBERNATE_TIMEOUT};
+            [{Key, TTLTime, _, _}] ->
+                Now = get_now(),
+                Return =
+                    case Now > TTLTime of
+                        true ->
+                            clean_other_table_via_key(Key, State),
+                            true = ets:delete(MainTable, Key),
+                            not_found;
+                        _ ->
+                            update_lru_time(Now, Key, State),
+                            ets:update_counter(MainTable, Key, UpdateOp)
+                    end,
+                {reply, Return, State, ?HIBERNATE_TIMEOUT}
+        end,
+    ok = trigger_aof(State, update_counter, [Key, UpdateOp]),
+    R;
 
 handle_call({update_counter, Key, UpdateOp, Default, TTLOption}, _From,
             #{ets_meta_table := MetaTable,
               ets_main_table := MainTable} = State) ->
-    case ets:lookup(MetaTable, Key) of
-        [] ->
-            ok   = set_ttl(Default, State, TTLOption),
-            true = ets:insert(MainTable, Default),
-            R    = ets:update_counter(MainTable, Key, UpdateOp),
-            %% trigger log
-            {reply, R, State, ?HIBERNATE_TIMEOUT};
-        [{Key, TTLTime, _, _}] ->
-            Now = get_now(),
-            Return =
-                case Now > TTLTime of
-                    true ->
-                        clean_other_table_via_key(Key, State),
-                        true = ets:delete(MainTable, Key),
-                        %% trigger log
-                        not_found;
-                    _ ->
-                        update_lru_time(Now, Key, State),
-                        ets:update_counter(MainTable, Key, UpdateOp)
-                        %% trigger log
-                end,
-            {reply, Return, State, ?HIBERNATE_TIMEOUT}
-    end;
+    Now = get_now(),
+    R   =
+        case ets:lookup(MetaTable, Key) of
+            [] ->
+                ok   = set_ttl(Default, State, TTLOption),
+                true = ets:insert(MainTable, Default),
+                Res  = ets:update_counter(MainTable, Key, UpdateOp),
+                erlang:send(erlang:self(), refresh_main_table),
+                {reply, Res, State, ?HIBERNATE_TIMEOUT};
+            [{Key, TTLTime, _, _}] ->
+                Return =
+                    case Now > TTLTime of
+                        true ->
+                            clean_other_table_via_key(Key, State),
+                            true = ets:delete(MainTable, Key),
+                            not_found;
+                        _ ->
+                            update_lru_time(Now, Key, State),
+                            ets:update_counter(MainTable, Key, UpdateOp)
+                    end,
+                {reply, Return, State, ?HIBERNATE_TIMEOUT}
+        end,
+    ok = trigger_aof(State, update_counter,
+                     [Now, Key, UpdateOp, Default, TTLOption]),
+    R;
 
 handle_call({get_ttl, Key}, _From,
             #{ets_meta_table := MetaTable} = State) ->
@@ -327,25 +394,30 @@ handle_call({reset_ttl, Key, Time}, _From,
             #{ets_meta_table := MetaTable,
               ets_ttl_table  := TTLTable ,
               ets_lru_table  := LRUTable  } = State) ->
-    case ets:lookup(MetaTable, Key) of
-        [] ->
-            {reply, -1, State, ?HIBERNATE_TIMEOUT};
-        [{Key, OldTTLTime, OldInsertTime, OldUpdateTime}] ->
-            Now     = get_now(),
-            TTLTime = get_ttl_time(Time, Now),
-            true = ets:delete(TTLTable, {OldTTLTime, Key}),
-            true = ets:delete(LRUTable, {OldUpdateTime, Key}),
-            true = ets:insert(TTLTable, {{TTLTime, Key}, nouse}),
-            true = ets:insert(LRUTable, {{Now, Key}, nouse}),
-            true = ets:insert(MetaTable, {Key, TTLTime, OldInsertTime, Now}),
-            %% trigger log
-            {reply, true, State, ?HIBERNATE_TIMEOUT}
-    end;
+    Now = get_now(),
+    R   =
+        case ets:lookup(MetaTable, Key) of
+            [] ->
+                {reply, -1, State, ?HIBERNATE_TIMEOUT};
+            [{Key, OldTTLTime, OldInsertTime, OldUpdateTime}] ->
+                TTLTime = get_ttl_time(Time, Now),
+                true = ets:delete(TTLTable, {OldTTLTime, Key}),
+                true = ets:delete(LRUTable, {OldUpdateTime, Key}),
+                true = ets:insert(TTLTable, {{TTLTime, Key}, nouse}),
+                true = ets:insert(LRUTable, {{Now, Key}, nouse}),
+                true = ets:insert(MetaTable, {Key, TTLTime, OldInsertTime, Now}),
+                {reply, true, State, ?HIBERNATE_TIMEOUT}
+        end,
+    ok = trigger_aof(State, reset_ttl, [Now, Key, Time]),
+    R;
 
 handle_call({subscribe, Subscriber}, _From, State) ->
     OldSubscribeList = maps:get(subscribe_list, State, []),
     {reply, ok, State#{subscribe_list => [Subscriber | OldSubscribeList]},
      ?HIBERNATE_TIMEOUT};
+
+handle_call(exit, _From, State) ->
+    {stop, normal, ok, State};
 
 handle_call(_Request, _From, State) ->
     {reply, unsupported, State, ?HIBERNATE_TIMEOUT}.
@@ -444,9 +516,6 @@ handle_info({log_deleted_key, DeleteKey}, State) ->
                 erlang:send_after(timer:seconds(1), erlang:self(), notify_subscriber);
             {false, OldTimeoutRef} ->
                 OldTimeoutRef;
-            % {true, -1} ->
-            %     ok = notify_subscriber(State),
-            %     -1;
             {true, OldTimeoutRef} ->
                 ok = notify_subscriber(State),
                 _  = erlang:cancel_timer(OldTimeoutRef),
@@ -500,18 +569,35 @@ get_mem_limit({kb, Num}) ->
 get_mem_limit({b, Num}) ->
     erlang:trunc(Num / 8).
 
+trigger_aof(ServerState, FunName, Args) ->
+    case maps:get(aof_pid, ServerState, -1) of
+        AOFPid when erlang:is_pid(AOFPid) ->
+            MainTable = maps:get(ets_main_table, ServerState),
+            erlang:send(AOFPid, {aof, MainTable, FunName, Args}),
+            ok;
+        _ ->
+            ok
+    end.
+
+
+
 set_ttl(Objects, ServerState, TTLOption) when erlang:is_list(Objects) ->
-    [ok = set_ttl(Object, ServerState, TTLOption) || Object <- Objects],
+    Now = get_now(),
+    set_ttl(Now, Objects, ServerState, TTLOption);
+set_ttl(Object, ServerState, TTLOption) when erlang:is_tuple(Object) ->
+    set_ttl(get_now(), Object, ServerState, TTLOption).
+
+set_ttl(Now, Objects, ServerState, TTLOption) when erlang:is_list(Objects) ->
+    [ok = set_ttl(Now, Object, ServerState, TTLOption) || Object <- Objects],
     ok;
 
-set_ttl(Object, ServerState, TTLOption) when erlang:is_tuple(Object) ->
+set_ttl(Now, Object, ServerState, TTLOption) when erlang:is_tuple(Object) ->
     NewETSOptions = maps:get(new_ets_options, ServerState),
     MetaTable = maps:get(ets_meta_table, ServerState),
     TTLTable  = maps:get(ets_ttl_table , ServerState),
     FIFOTable = maps:get(ets_fifo_table, ServerState),
     LRUTable  = maps:get(ets_lru_table , ServerState),
     Key       = get_object_key(NewETSOptions, Object),
-    Now       = get_now(),
     TTLTime   = get_ttl_time(TTLOption, Now),
     case ets:lookup(MetaTable, Key) of
         [] ->
@@ -558,7 +644,6 @@ clean_unuse_via_ttl({TTLTime, OriginKey} = Key, TTLTable,
         true ->
             ok   = clean_other_table_via_key(OriginKey, ServerState),
             true = ets:delete(MainTable, OriginKey),
-            %% trigger log
             clean_unuse_via_ttl(ets:next(TTLTable, Key), TTLTable,
                                 ServerState);
         false ->
@@ -574,7 +659,6 @@ clean_single_key_via_fifo(ServerState) ->
         {_, Key} ->
             ok = clean_other_table_via_key(Key, ServerState),
             true = ets:delete(MainTable, Key)
-            %% trigger log
     end,
     ServerState.
 
@@ -587,22 +671,32 @@ clean_single_key_via_lru(ServerState) ->
         {_, Key} ->
             ok = clean_other_table_via_key(Key, ServerState),
             true = ets:delete(MainTable, Key)
-            %% trigger log
     end,
     ServerState.
 
 clean_other_table_via_key(OriginKey, ServerState) ->
+    clean_other_table_via_key(log_deleted_key, OriginKey, ServerState).
+
+clean_other_table_via_key(IsLog, OriginKey, ServerState) ->
     MetaTable = maps:get(ets_meta_table, ServerState),
     TTLTable  = maps:get(ets_ttl_table , ServerState),
     FIFOTable = maps:get(ets_fifo_table, ServerState),
     LRUTable  = maps:get(ets_lru_table , ServerState),
-    [{OriginKey, TTLTime, InsertTime, UpdateTime}] =
-        ets:lookup(MetaTable, OriginKey),
-    true = ets:delete(MetaTable, OriginKey),
-    true = ets:delete(TTLTable , {TTLTime, OriginKey}),
-    true = ets:delete(FIFOTable, {InsertTime, OriginKey}),
-    true = ets:delete(LRUTable , {UpdateTime, OriginKey}),
-    erlang:send(erlang:self(), {log_deleted_key, OriginKey}),
+    case ets:lookup(MetaTable, OriginKey) of
+        [] ->
+            ignore;
+        [{OriginKey, TTLTime, InsertTime, UpdateTime}] ->
+            true = ets:delete(MetaTable, OriginKey),
+            true = ets:delete(TTLTable , {TTLTime, OriginKey}),
+            true = ets:delete(FIFOTable, {InsertTime, OriginKey}),
+            true = ets:delete(LRUTable , {UpdateTime, OriginKey})
+    end,
+    case IsLog of
+        log_deleted_key ->
+            erlang:send(erlang:self(), {log_deleted_key, OriginKey});
+        _ ->
+            ignore
+    end,
     ok.
 
 get_object_key(NewETSOptions, Object) ->
@@ -639,17 +733,10 @@ get_list_item(_, _, Default) ->
 -include_lib("eunit/include/eunit.hrl").
 
 gen_rets_test_() ->
-    [ {"no new ets table", timeout, 20,
+    [ {"basic insert flow",
         fun() ->
-            {ok, Pid} = gen_rets:start_link([]),
-            timer:sleep(timer:seconds(11)),
-            ?assertEqual(true, erlang:is_process_alive(Pid)),
-            ?assertEqual(true, gen_rets:delete(Pid))
-        end}
-    , {"basic insert flow",
-        fun() ->
-            {ok, Pid} = gen_rets:start_link([]),
-            gen_rets:new(Pid, test_for_ets, []),
+            {ok, Pid} = gen_rets:start_link([{ets_table_name, test_for_ets},
+                                             {new_ets_options, []}]),
             Table = gen_rets:get_ets(Pid),
             gen_rets:insert(Pid, [{akey, avalue}, {bkey, bvalue}], {sec, 2}),
             timer:sleep(timer:seconds(3)),
@@ -660,8 +747,8 @@ gen_rets_test_() ->
         end}
     , {"repeated insert",
         fun() ->
-            {ok, Pid} = gen_rets:start_link([]),
-            gen_rets:new(Pid, test_for_ets, []),
+            {ok, Pid} = gen_rets:start_link([{ets_table_name, test_for_ets},
+                                             {new_ets_options, []}]),
             gen_rets:insert(Pid, {akey, avalue}, {sec, 1}),
             timer:sleep(timer:seconds(1)),
             gen_rets:insert(Pid, {akey, anewvalue}, {sec, 2}),
@@ -674,8 +761,8 @@ gen_rets_test_() ->
         end}
     , {"insert new", timeout, 10,
         fun() ->
-            {ok, Pid} = gen_rets:start_link([]),
-            gen_rets:new(Pid, test_for_ets, []),
+            {ok, Pid} = gen_rets:start_link([{ets_table_name, test_for_ets},
+                                             {new_ets_options, []}]),
             ?assertEqual(true , gen_rets:insert_new(Pid, {akey, avalue},
                                                     {sec, 4})),
             ?assertEqual(false, gen_rets:insert_new(Pid, {akey, aothervalue},
@@ -686,8 +773,8 @@ gen_rets_test_() ->
         end}
     , {"delete key",
         fun() ->
-            {ok, Pid} = gen_rets:start_link([]),
-            gen_rets:new(Pid, test_for_ets, []),
+            {ok, Pid} = gen_rets:start_link([{ets_table_name, test_for_ets},
+                                             {new_ets_options, []}]),
             gen_rets:insert(Pid, [{akey, avalue}, {bkey, bvalue}], {sec, 2}),
             ?assertEqual(true, gen_rets:delete(Pid, akey)),
             ?assertEqual([], gen_rets:lookup(Pid, akey)),
@@ -699,8 +786,8 @@ gen_rets_test_() ->
         end}
     , {"auto ttl 1", timeout, 20,
         fun() ->
-            {ok, Pid} = gen_rets:start_link([]),
-            gen_rets:new(Pid, test_for_ets, []),
+            {ok, Pid} = gen_rets:start_link([{ets_table_name, test_for_ets},
+                                             {new_ets_options, []}]),
             ?assertEqual(ok, gen_rets:subscribe(Pid)),
             gen_rets:insert(Pid, {akey, avalue}, {sec, 3}),
             timer:sleep(timer:seconds(11)),
@@ -713,8 +800,8 @@ gen_rets_test_() ->
         end}
     , {"auto ttl 2", timeout, 20,
         fun() ->
-            {ok, Pid} = gen_rets:start_link([]),
-            gen_rets:new(Pid, test_for_ets, []),
+            {ok, Pid} = gen_rets:start_link([{ets_table_name, test_for_ets},
+                                             {new_ets_options, []}]),
             ?assertEqual(ok, gen_rets:subscribe(Pid)),
             gen_rets:insert(Pid, {akey, avalue}, {sec, 3}),
             gen_rets:insert(Pid, {bkey, bvalue}, {sec, 15}),
@@ -729,8 +816,8 @@ gen_rets_test_() ->
         end}
     , {"auto ttl 3", timeout, 20,
         fun() ->
-            {ok, Pid} = gen_rets:start_link([]),
-            gen_rets:new(Pid, test_for_ets, []),
+            {ok, Pid} = gen_rets:start_link([{ets_table_name, test_for_ets},
+                                             {new_ets_options, []}]),
             ?assertEqual(ok, gen_rets:subscribe(Pid)),
             gen_rets:insert(Pid, {akey, avalue}, {sec, 3}),
             gen_rets:insert(Pid, {bkey, bvalue}, {sec, 3}),
@@ -745,8 +832,8 @@ gen_rets_test_() ->
         end}
     , {"get ttl",
         fun() ->
-            {ok, Pid} = gen_rets:start_link([]),
-            gen_rets:new(Pid, test_for_ets, []),
+            {ok, Pid} = gen_rets:start_link([{ets_table_name, test_for_ets},
+                                             {new_ets_options, []}]),
             ?assertEqual(-1, gen_rets:get_ttl(Pid, fake_key)),
             ?assertEqual(true, gen_rets:insert(Pid, {akey, avalue}, {sec, 10})),
             ?assertEqual(true, 10 - gen_rets:get_ttl(Pid, akey) =< 1),
@@ -754,8 +841,8 @@ gen_rets_test_() ->
         end}
     , {"reset ttl", timeout, 20,
         fun() ->
-            {ok, Pid} = gen_rets:start_link([]),
-            gen_rets:new(Pid, test_for_ets, []),
+            {ok, Pid} = gen_rets:start_link([{ets_table_name, test_for_ets},
+                                             {new_ets_options, []}]),
             Table = gen_rets:get_ets(Pid),
             ?assertEqual(-1, gen_rets:reset_ttl(Pid, fake_key, {sec, 10})),
             ?assertEqual(true, gen_rets:insert(Pid, {akey, avalue}, {sec, 5})),
@@ -795,8 +882,9 @@ gen_rets_test_() ->
             {ok, Pid} = gen_rets:start_link([{expire_mode, fifo},
                                              {max_size, 3},
                                              {max_mem, {mb, 10}},
-                                             {highwater_size, 2}]),
-            gen_rets:new(Pid, test_for_ets, []),
+                                             {highwater_size, 2},
+                                             {ets_table_name, test_for_ets},
+                                             {new_ets_options, []}]),
             gen_rets:insert(Pid, {akey, avalue}, {sec, 20}),
             gen_rets:insert(Pid, {bkey, avalue}, {sec, 20}),
             gen_rets:insert(Pid, {ckey, avalue}, {sec, 20}),
@@ -830,8 +918,9 @@ gen_rets_test_() ->
             {ok, Pid} = gen_rets:start_link([{expire_mode, lru},
                                              {max_size, 5},
                                              {max_mem, {mb, 10}},
-                                             {highwater_size, 3}]),
-            gen_rets:new(Pid, test_for_ets, []),
+                                             {highwater_size, 3},
+                                             {ets_table_name, test_for_ets},
+                                             {new_ets_options, []}]),
             gen_rets:insert(Pid, {akey, avalue}, {sec, 20}),
             gen_rets:insert(Pid, {bkey, avalue}, {sec, 20}),
             gen_rets:insert(Pid, {ckey, avalue}, {sec, 20}),
@@ -872,8 +961,9 @@ gen_rets_test_() ->
         fun() ->
             {ok, Pid} = gen_rets:start_link([{expire_mode, fifo},
                                              {max_mem, {b, 32000}},
-                                             {highwater_mem, {b, 19300}}]),
-            gen_rets:new(Pid, test_for_ets, []),
+                                             {highwater_mem, {b, 19300}},
+                                             {ets_table_name, test_for_ets},
+                                             {new_ets_options, []}]),
             Value = lists:seq(1, 200),
             ?assertEqual(true, gen_rets:insert(Pid, [{X, Value}
                                                      || X <- lists:seq(1, 12)],
@@ -888,8 +978,9 @@ gen_rets_test_() ->
         fun() ->
             {ok, Pid} = gen_rets:start_link([{expire_mode, lru},
                                              {max_mem, {b, 32000}},
-                                             {highwater_mem, {b, 19300}}]),
-            gen_rets:new(Pid, test_for_ets, []),
+                                             {highwater_mem, {b, 19300}},
+                                             {ets_table_name, test_for_ets},
+                                             {new_ets_options, []}]),
             Value = lists:seq(1, 200),
             ?assertEqual(true, gen_rets:insert(Pid, [{X, Value}
                                                      || X <- lists:seq(1, 12)],
@@ -902,8 +993,8 @@ gen_rets_test_() ->
         end}
     , {"delete_object",
         fun() ->
-            {ok, Pid} = gen_rets:start_link([]),
-            gen_rets:new(Pid, test_for_ets, [bag]),
+            {ok, Pid} = gen_rets:start_link([{ets_table_name, test_for_ets},
+                                             {new_ets_options, [bag]}]),
             ?assertEqual(true, gen_rets:insert(Pid, [{a, v1}, {a, v2}], {sec, 10})),
             ?assertEqual(true, gen_rets:delete_object(Pid, {c, v1})),
             ?assertEqual(true, gen_rets:delete_object(Pid, {a, v1})),
@@ -928,8 +1019,8 @@ gen_rets_test_() ->
         end}
     , {"delete_all_objects",
         fun() ->
-            {ok, Pid} = gen_rets:start_link([]),
-            gen_rets:new(Pid, test_for_ets, [bag]),
+            {ok, Pid} = gen_rets:start_link([{ets_table_name, test_for_ets},
+                                             {new_ets_options, [bag]}]),
             ?assertEqual(true, gen_rets:insert(Pid, [{a, v1}, {a, v2}], {sec, 10})),
             ?assertEqual(true, gen_rets:delete_all_objects(Pid)),
             ServerState = sys:get_state(Pid),
@@ -947,15 +1038,14 @@ gen_rets_test_() ->
         end}
     , {"update_counter/3",
         fun() ->
-            {ok, Pid} = gen_rets:start_link([]),
-            gen_rets:new(Pid, test_for_ets, []),
+            {ok, Pid} = gen_rets:start_link([{ets_table_name, test_for_ets},
+                                             {new_ets_options, []}]),
             'update_counter_test/3'(Pid),
             ?assertEqual(true, gen_rets:delete(Pid))
         end}
     , {"update_counter/4",
         fun() ->
             {ok, Pid} = gen_rets:start_link([]),
-            gen_rets:new(Pid, test_for_ets, []),
             '18_update_counter_test/4'(Pid),
             ?assertEqual(true, gen_rets:delete(Pid))
         end}
