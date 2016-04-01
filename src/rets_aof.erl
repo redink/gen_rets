@@ -38,12 +38,20 @@ init([Options]) ->
     ServerState  = gen_rets:get_list_item(server_state, Options),
     AOFRootDir   = application:get_env(gen_rets, aof_root_dir,
                                        "./aof_root_dir/"),
-    LogDir = AOFRootDir ++ erlang:atom_to_list(EtsTableName) ++ "/",
+    LogDir = filename:join(AOFRootDir, erlang:atom_to_list(EtsTableName)),
+    % LogDir = AOFRootDir ++ erlang:atom_to_list(EtsTableName) ++ "/",
     ok = filelib:ensure_dir(LogDir),
-    case filelib:wildcard(LogDir ++ "*") of
+    case filelib:wildcard("*.seg", LogDir) of
         [] ->
             ok;
-        _ ->
+        [OneFile] ->
+            case filelib:file_size(filename:join(LogDir, OneFile)) of
+                0 ->
+                    ok;
+                _ ->
+                    ok = recover_table_data(LogDir, ServerState)
+            end;
+        _A ->
             ok = recover_table_data(LogDir, ServerState)
     end,
     LogTopic = gululog_topic:init(LogDir, [{cache_policy, minimum}]),
@@ -64,9 +72,20 @@ handle_info({aof, _, clean_aof_log, _},
             #{ log_topic := LogTopic
              , log_dir   := LogDir} = State) ->
     ok = gululog_topic:close(LogTopic),
-    [ok = file:delete(File) || File <- filelib:wildcard(LogDir ++ "*")],
+    [ok = file:delete(filename:join(LogDir, File))
+     || File <- filelib:wildcard("*", LogDir)],
+    ok = file:del_dir(LogDir),
+    ok = filelib:ensure_dir(LogDir),
     NewTopic = gululog_topic:init(LogDir, [{cache_policy, minimum}]),
     {noreply, State#{log_topic := NewTopic}, ?HIBERNATE_TIMEOUT};
+
+handle_info({aof, _, delete_aof_log, _},
+            #{ log_topic := LogTopic
+             , log_dir   := LogDir} = State) ->
+    ok = gululog_topic:close(LogTopic),
+    [ok = file:delete(filename:join(LogDir, File))
+     || File <- filelib:wildcard("*", LogDir)],
+    {stop, normal, State};
 
 handle_info({aof, EtsTableName, FunName, Args},
             #{ ets_table_name := EtsTableName
@@ -109,105 +128,14 @@ recover_table_data({NewReadCur, {_, _, _, B}}, _OldReadCur, ServerState) ->
 
 execute_recover(BinData, ServerState) ->
     Data    = process_body(BinData),
+    io:format(" data ~p~n", [Data]),
     FunName = gen_rets:get_list_item(funname, Data),
     Args    = gen_rets:get_list_item(args, Data),
     execute_recover(FunName, Args, ServerState).
 
-execute_recover(insert, [OldNow, Objects, TTLOption], ServerState) ->
-    case gen_rets:get_now() < gen_rets:get_ttl_time(TTLOption, OldNow) of
-        true ->
-            MainTable = maps:get(ets_main_table, ServerState),
-            true = ets:insert(MainTable, Objects),
-            ok   = gen_rets:set_ttl(OldNow, Objects, ServerState, TTLOption),
-            ok;
-        _ ->
-            ok
-    end;
-execute_recover(insert_new, [OldNow, Objects, TTLOption], ServerState) ->
-    case gen_rets:get_now() < gen_rets:get_ttl_time(TTLOption, OldNow) of
-        true ->
-            MainTable = maps:get(ets_main_table, ServerState),
-            case ets:insert_new(MainTable, Objects) of
-                true ->
-                    ok = gen_rets:set_ttl(OldNow, Objects,
-                                          ServerState, TTLOption),
-                    ok;
-                _ ->
-                    ok
-            end;
-        _ ->
-            ok
-    end;
-execute_recover(delete, [Key], ServerState) ->
-    MainTable = maps:get(ets_main_table, ServerState),
-    ok   = gen_rets:clean_other_table_via_key(no, Key, ServerState),
-    true = ets:delete(MainTable, Key),
-    ok;
-execute_recover(delete_object, [Object], ServerState) ->
-    NewETSOptions = maps:get(new_ets_options, ServerState),
-    MainTable     = maps:get(ets_main_table , ServerState),
-    Key = gen_rets:get_object_key(NewETSOptions, Object),
-    case ets:lookup(Key, MainTable) of
-        [] ->
-            ignore;
-        [_] ->
-            ok   = gen_rets:clean_other_table_via_key(no, Key, ServerState),
-            true = ets:delete_object(MainTable, Object);
-        [_ | _] ->
-            true = ets:delete_object(MainTable, Object)
-    end,
-    ok;
-execute_recover(update_counter, [Key, UpdateOp], ServerState) ->
-    MainTable = maps:get(ets_main_table, ServerState),
-    case ets:lookup(MainTable, Key) of
-        [] ->
-            ignore;
-        _ ->
-            ets:update_counter(MainTable, Key, UpdateOp)
-    end,
-    ok;
-execute_recover(update_counter,
-                [OldNow, Key, UpdateOp, Default, TTLOption],
-                ServerState) ->
-    case gen_rets:get_now() < gen_rets:get_ttl_time(TTLOption, OldNow) of
-        true ->
-            MainTable = maps:get(ets_main_table, ServerState),
-            case ets:lookup(MainTable, Key) of
-                [] ->
-                    true = ets:insert(MainTable, Default),
-                    _  = ets:update_counter(MainTable, Key, UpdateOp),
-                    ok = gen_rets:set_ttl(OldNow, Default,
-                                          ServerState, TTLOption),
-                    ok;
-                _ ->
-                    ets:update_counter(MainTable, Key, UpdateOp),
-                    ok
-            end;
-        _ ->
-            ok
-    end;
-execute_recover(reset_ttl, [OldNow, Key, Time], ServerState) ->
-    TmpVar = gen_rets:get_ttl_time(Time, OldNow),
-    case gen_rets:get_now() < TmpVar of
-        true ->
-            MetaTable = maps:get(ets_meta_table, ServerState),
-            TTLTable  = maps:get(ets_ttl_table , ServerState),
-            LRUTable  = maps:get(ets_lru_table , ServerState),
-            case ets:lookup(MetaTable, Key) of
-                [{Key, OldTTLTime, OldInsertTime, OldUpdateTime}] ->
-                    TTLTime = TmpVar,
-                    true = ets:delete(TTLTable, {OldTTLTime, Key}),
-                    true = ets:delete(LRUTable, {OldUpdateTime, Key}),
-                    true = ets:insert(TTLTable, {{TTLTime, Key}, nouse}),
-                    true = ets:insert(LRUTable, {{OldNow, Key}, nouse}),
-                    true = ets:insert(MetaTable, {Key, TTLTime, OldInsertTime, OldNow}),
-                    ok;
-                _ ->
-                    ok
-            end;
-        _ ->
-            ok
-    end.
+execute_recover({Mod, Fun}, Args, ServerState) ->
+    erlang:apply(Mod, Fun, [ServerState | Args]),
+    ok.
 
 generate_body(FunName, Args) ->
     erlang:term_to_binary([{funname, FunName}, {args, Args}]).
@@ -217,34 +145,5 @@ process_body(BinData) ->
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
-
-rets_aof_test_() ->
-    [ {"start_link 1",
-        fun() ->
-            {ok, Pid} = gen_rets:start_link([{ets_table_name, test_for_ets},
-                                             {new_ets_options, [named_table]}]),
-            gen_rets:insert(Pid, [{akey, avalue}, {bkey, bvalue}], {sec, 2}),
-            timer:sleep(timer:seconds(3)),
-            ?assertEqual([], gen_rets:lookup(Pid, akey)),
-            ?assertEqual([], gen_rets:lookup(Pid, bkey)),
-            ?assertEqual(true, gen_rets:delete(Pid)),
-            ?assertEqual(undefined, ets:info(test_for_ets))
-        end}
-    , {"start_link 2",
-        fun() ->
-            {ok, Pid} = gen_rets:start([{name, test_process},
-                                        {ets_table_name, test_for_ets},
-                                        {new_ets_options, [named_table, public]},
-                                        {persistence, aof}]),
-            gen_rets:insert(Pid, [{akey, avalue}, {bkey, bvalue}], {sec, 100}),
-            ok = gen_server:call(Pid, exit),
-            {ok, Pid1} = gen_rets:start_link([{name, test_process},
-                                              {ets_table_name, test_for_ets},
-                                              {new_ets_options, [named_table, public]},
-                                              {persistence, aof}]),
-            ?assertEqual([{akey, avalue}], gen_rets:lookup(Pid1, akey)),
-            ?assertEqual([{bkey, bvalue}], gen_rets:lookup(Pid1, bkey))
-        end}
-    ].
 
 -endif.
