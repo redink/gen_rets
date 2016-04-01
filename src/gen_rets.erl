@@ -472,7 +472,8 @@ handle_info(_Info, State) ->
     {noreply, State, ?HIBERNATE_TIMEOUT}.
 
 %%--------------------------------------------------------------------
-terminate(normal, _State) ->
+terminate(normal, State) ->
+    ok = trigger_aof(State, close_aof_log, []),
     ok;
 terminate(_Reason, State) ->
     ok = trigger_aof(State, delete_aof_log, []),

@@ -79,11 +79,12 @@ handle_info({aof, _, clean_aof_log, _},
     {noreply, State#{log_topic := NewTopic}, ?HIBERNATE_TIMEOUT};
 
 handle_info({aof, _, delete_aof_log, _},
-            #{ log_topic := LogTopic
-             , log_dir   := LogDir} = State) ->
-    ok = gululog_topic:close(LogTopic),
+            #{log_dir   := LogDir} = State) ->
     [ok = file:delete(filename:join(LogDir, File))
      || File <- filelib:wildcard("*", LogDir)],
+    {stop, normal, State};
+
+handle_info({aof, _, close_aof_log, _}, State) ->
     {stop, normal, State};
 
 handle_info({aof, EtsTableName, FunName, Args},
@@ -103,7 +104,8 @@ handle_info(_Info, State) ->
     {noreply, State, ?HIBERNATE_TIMEOUT}.
 
 %%--------------------------------------------------------------------
-terminate(_Reason, _State) ->
+terminate(_Reason, #{log_topic := LogTopic} = _State) ->
+    ok = gululog_topic:close(LogTopic),
     ok.
 
 %%--------------------------------------------------------------------
