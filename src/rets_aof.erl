@@ -39,7 +39,6 @@ init([Options]) ->
     AOFRootDir   = application:get_env(gen_rets, aof_root_dir,
                                        "./aof_root_dir/"),
     LogDir = filename:join(AOFRootDir, erlang:atom_to_list(EtsTableName)),
-    % LogDir = AOFRootDir ++ erlang:atom_to_list(EtsTableName) ++ "/",
     ok = filelib:ensure_dir(LogDir),
     case filelib:wildcard("*.seg", LogDir) of
         [] ->
@@ -128,7 +127,6 @@ recover_table_data({NewReadCur, {_, _, _, B}}, _OldReadCur, ServerState) ->
 
 execute_recover(BinData, ServerState) ->
     Data    = process_body(BinData),
-    io:format(" data ~p~n", [Data]),
     FunName = gen_rets:get_list_item(funname, Data),
     Args    = gen_rets:get_list_item(args, Data),
     execute_recover(FunName, Args, ServerState).
@@ -138,9 +136,17 @@ execute_recover({Mod, Fun}, Args, ServerState) ->
     ok.
 
 generate_body(FunName, Args) ->
-    erlang:term_to_binary([{funname, FunName}, {args, Args}]).
+    lz4_pack([{funname, FunName}, {args, Args}]).
 
 process_body(BinData) ->
+    lz4_unpack(BinData).
+
+lz4_pack(Data) ->
+    {ok, Pack} = lz4:pack(erlang:term_to_binary(Data)),
+    Pack.
+
+lz4_unpack(Data) ->
+    {ok, BinData} = lz4:unpack(Data),
     erlang:binary_to_term(BinData).
 
 -ifdef(TEST).

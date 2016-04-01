@@ -472,9 +472,11 @@ handle_info(_Info, State) ->
     {noreply, State, ?HIBERNATE_TIMEOUT}.
 
 %%--------------------------------------------------------------------
-terminate(_Reason, _State) ->
+terminate(normal, _State) ->
+    ok;
+terminate(_Reason, State) ->
+    ok = trigger_aof(State, delete_aof_log, []),
     ok.
-
 %%--------------------------------------------------------------------
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
