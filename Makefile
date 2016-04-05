@@ -1,6 +1,6 @@
 .PHONY: compile rel ct doc
 
-all: compile
+all: deps compile
 
 REBAR ?= $(shell which ./rebar 2>/dev/null || which rebar)
 

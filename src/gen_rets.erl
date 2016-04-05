@@ -47,7 +47,7 @@
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
          terminate/2, code_change/3]).
 -define(SERVER, ?MODULE).
--define(HIBERNATE_TIMEOUT, 10000).
+-define(HIBERNATE_TIMEOUT, 1000).
 -define(MAXTTLTIME, {hour, 24 * 365 * 100}).
 
 -ifdef(TEST).
@@ -243,14 +243,14 @@ handle_call({insert, Objects, TTLOption}, _From, State) ->
     true = call_insert(State, Now, Objects, TTLOption),
     ok   = trigger_aof(State, {?MODULE, call_insert},
                        [Now, Objects, TTLOption]),
-    erlang:send(erlang:self(), refresh_main_table),
+    refresh_main_table(normal),
     {reply, true, State, ?HIBERNATE_TIMEOUT};
 
 handle_call({insert_new, Objects, TTLOption}, _From, State) ->
     Now = get_now(),
     case R = call_insert_new(State, Now, Objects, TTLOption) of
         true ->
-            erlang:send(erlang:self(), refresh_main_table);
+            refresh_main_table(normal);
         false ->
             ignore
     end,
@@ -326,7 +326,7 @@ handle_call({update_counter, Key, UpdateOp, Default, TTLOption}, _From, State) -
                               Default, TTLOption),
     ok  = trigger_aof(State, {?MODULE, call_update_counter},
                       [no, Now, Key, UpdateOp, Default, TTLOption]),
-    erlang:send(erlang:self(), refresh_main_table),
+    refresh_main_table(normal),
     {reply, R, State, ?HIBERNATE_TIMEOUT};
 
 handle_call({get_ttl, Key}, _From,
@@ -464,6 +464,7 @@ handle_info(notify_subscriber, State) ->
     {noreply, State, ?HIBERNATE_TIMEOUT};
 
 handle_info(timeout, State) ->
+    refresh_main_table(force),
     proc_lib:hibernate(gen_server, enter_loop,
                [?MODULE, [], State]),
     {noreply, State, ?HIBERNATE_TIMEOUT};
@@ -784,6 +785,15 @@ get_list_item(Key, PorpLORMap, Default) when erlang:is_map(PorpLORMap) ->
 get_list_item(_, _, Default) ->
     Default.
 
+-ifdef(TEST).
+refresh_main_table(_) ->
+    erlang:send(erlang:self(), refresh_main_table).
+-else.
+refresh_main_table(normal) ->
+    ignore;
+refresh_main_table(force) ->
+    erlang:send(erlang:self(), refresh_main_table).
+-endif.
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
