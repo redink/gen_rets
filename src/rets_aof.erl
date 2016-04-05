@@ -59,6 +59,14 @@ init([Options]) ->
           , ets_table_name => EtsTableName}, ?HIBERNATE_TIMEOUT}.
 
 %%--------------------------------------------------------------------
+handle_call({aof, EtsTableName, FunName, Args}, _From,
+            #{ ets_table_name := EtsTableName
+             , log_topic := LogTopic} = State) ->
+    Header = erlang:atom_to_binary(EtsTableName, utf8),
+    Body   = generate_body(FunName, Args),
+    NewTopic = gululog_topic:append(LogTopic, Header, Body),
+    {reply, ok, State#{log_topic := NewTopic}, ?HIBERNATE_TIMEOUT};
+
 handle_call(_Request, _From, State) ->
     {reply, ok, State, ?HIBERNATE_TIMEOUT}.
 

@@ -634,6 +634,15 @@ get_mem_limit({kb, Num}) ->
 get_mem_limit({b, Num}) ->
     erlang:trunc(Num / 8).
 
+trigger_aof(ServerState, {_, _} = FunName, Args) ->
+    case maps:get(aof_pid, ServerState, -1) of
+        AOFPid when erlang:is_pid(AOFPid) ->
+            MainTable = maps:get(ets_main_table, ServerState),
+            gen_server:call(AOFPid, {aof, MainTable, FunName, Args}),
+            ok;
+        _ ->
+            ok
+    end;
 trigger_aof(ServerState, FunName, Args) ->
     case maps:get(aof_pid, ServerState, -1) of
         AOFPid when erlang:is_pid(AOFPid) ->

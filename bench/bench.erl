@@ -29,14 +29,14 @@ write_ets() ->
     [ok = task:await(T, infinity) || T <- TaskRefList],
     After = os:timestamp(),
     io:format(" time used : ~p~n", [timer:now_diff(After, Before)]),
-    io:format(" write ets : ~p/s~n ", [TotalN / timer:now_diff(After, Before) * ?TOTALN]),
+    io:format(" write ets : ~.2f/s~n ", [TotalN / timer:now_diff(After, Before) * ?TOTALN]),
     ets:delete(Table),
     io:format("============= end write ets table ============~n~n"),
     ok.
 
 write_rets_no_persistence() ->
     {ok, Pid} = gen_rets:start_link([{ets_table_name, test_for_ets},
-                                     {new_ets_options, [named_table]},
+                                     {new_ets_options, [named_table, {write_concurrency, true}]},
                                      {max_size, 2000000},
                                      {highwater_size, 1900000}]),
     TotalN = ?TOTALN,
@@ -55,7 +55,7 @@ write_rets_no_persistence() ->
     [ok = task:await(T, infinity) || T <- TaskRefList],
     After = os:timestamp(),
     io:format(" time used : ~p~n", [timer:now_diff(After, Before)]),
-    io:format(" write ets : ~p/s~n ", [TotalN / timer:now_diff(After, Before) * ?TOTALN]),
+    io:format(" write ets : ~.2f/s~n ", [TotalN / timer:now_diff(After, Before) * ?TOTALN]),
     true = gen_rets:delete(Pid),
     io:format("============= end write rets no persistence ============~n~n"),
     ok.
@@ -81,7 +81,7 @@ write_rets_trigger_lru_no_persistence() ->
     [ok = task:await(T, infinity) || T <- TaskRefList],
     After = os:timestamp(),
     io:format(" time used : ~p~n", [timer:now_diff(After, Before)]),
-    io:format(" write ets : ~p/s~n ", [TotalN / timer:now_diff(After, Before) * ?TOTALN]),
+    io:format(" write ets : ~.2f/s~n ", [TotalN / timer:now_diff(After, Before) * ?TOTALN]),
     true = gen_rets:delete(Pid),
     io:format("============= end write rets trigger lru no persistence ============~n~n"),
     ok.
@@ -109,7 +109,7 @@ write_rets_with_persistence() ->
     [ok = task:await(T, infinity) || T <- TaskRefList],
     After = os:timestamp(),
     io:format(" time used : ~p~n", [timer:now_diff(After, Before)]),
-    io:format(" write ets : ~p/s~n ", [TotalN / timer:now_diff(After, Before) * ?TOTALN]),
+    io:format(" write ets : ~.2f/s~n ", [TotalN / timer:now_diff(After, Before) * ?TOTALN]),
     true = gen_rets:delete(Pid),
     io:format("============= end write rets with persistence ============~n~n"),
     ok.
