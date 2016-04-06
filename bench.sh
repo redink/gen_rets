@@ -1,4 +1,4 @@
-#!bash/sh
+#!/bin/sh
 
 make all
 cd bench
