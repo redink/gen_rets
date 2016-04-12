@@ -24,6 +24,7 @@
         , lookup/2
         , update_counter/3
         , update_counter/5
+        , update_element/3
         , get_ttl/2
         , reset_ttl/3
         , subscribe/1
@@ -36,6 +37,7 @@
         , call_delete_object/3
         , call_update_counter/5
         , call_update_counter/7
+        , call_update_element/5
         , call_reset_ttl/4
         ]).
 
@@ -113,6 +115,12 @@ update_counter(ServerPid, Key, UpdateOp) ->
 update_counter(ServerPid, Key, UpdateOp, Default, TTLOption) ->
     gen_server:call(ServerPid, {update_counter, Key, UpdateOp,
                                 Default, TTLOption}).
+
+-spec update_element(pid() | atom(), term(),
+                     {integer(), term()} |
+                     [{integer(), term()}]) -> boolean().
+update_element(ServerPid, Key, ElementSpec) ->
+    gen_server:call(ServerPid, {update_element, Key, ElementSpec}).
 
 -spec get_ttl(pid() | atom(), term()) -> integer().
 get_ttl(ServerPid, Key) ->
@@ -326,6 +334,14 @@ handle_call({update_counter, Key, UpdateOp, Default, TTLOption}, _From, State) -
                               Default, TTLOption),
     ok  = trigger_aof(State, {?MODULE, call_update_counter},
                       [no, Now, Key, UpdateOp, Default, TTLOption]),
+    refresh_main_table(normal),
+    {reply, R, State, ?HIBERNATE_TIMEOUT};
+
+handle_call({update_element, Key, ElementSpec}, _From, State) ->
+    Now = get_now(),
+    R   = call_update_element(State, log_deleted_key, Now, Key, ElementSpec),
+    ok  = trigger_aof(State, {?MODULE, call_update_element},
+                      [no, Now, Key, ElementSpec]),
     refresh_main_table(normal),
     {reply, R, State, ?HIBERNATE_TIMEOUT};
 
@@ -585,6 +601,26 @@ call_update_counter(#{ ets_meta_table := MetaTable
             end;
         _ ->
             not_found
+    end.
+
+-spec call_update_element(map(), atom(), integer(), term(),
+                          {integer(), term()} |
+                          [{integer(), term()}]) -> boolean().
+call_update_element(#{ ets_meta_table := MetaTable
+                     , ets_main_table := MainTable} = State,
+                    IsLog, StandardNow, Key, ElementSpec) ->
+    case ets:lookup(MetaTable, Key) of
+        [] ->
+            false;
+        [{Key, TTLTime, _, _}] ->
+            case StandardNow > TTLTime of
+                true ->
+                    call_delete(State, IsLog, Key),
+                    false;
+                _ ->
+                    update_lru_time(StandardNow, Key, State),
+                    ets:update_element(MainTable, Key, ElementSpec)
+            end
     end.
 
 -spec call_reset_ttl(map(), integer(), term(),
@@ -1136,6 +1172,31 @@ gen_rets_test_() ->
                                              {name, '18_update_counter_test_4'},
                                              {persistence, aof}]),
             '18_update_counter_test/4'(Pid)
+        end}
+    , {"update_element/3", timeout, 20,
+        fun() ->
+            {ok, Pid} = gen_rets:start_link([{ets_table_name, 'update_element_3'},
+                                             {new_ets_options, [named_table, public]},
+                                             {name, 'update_element_3'},
+                                             {persistence, aof}]),
+            ?assertEqual(false, gen_rets:update_element(Pid, "redink", {2, "sichuan"})),
+            ?assertEqual(true, gen_rets:insert(Pid, {"redink", "sichuan"}, {sec, 5})),
+            ?assertEqual(true, gen_rets:update_element(Pid, "redink", {2, "beijing"})),
+            ?assertEqual([{"redink", "beijing"}], gen_rets:lookup(Pid, "redink")),
+            ?assertEqual(ok, gen_server:call(Pid, exit)),
+            {ok, Pid1} = gen_rets:start_link([{ets_table_name, 'update_element_3'},
+                                              {new_ets_options, [named_table, public]},
+                                              {name, 'update_element_3'},
+                                              {persistence, aof}]),
+            ?assertEqual([{"redink", "beijing"}], gen_rets:lookup(Pid1, "redink")),
+            ?assertEqual(ok, gen_server:call(Pid1, exit)),
+            timer:sleep(timer:seconds(5)),
+            {ok, Pid2} = gen_rets:start_link([{ets_table_name, 'update_element_3'},
+                                              {new_ets_options, [named_table, public]},
+                                              {name, 'update_element_3'},
+                                              {persistence, aof}]),
+            ?assertEqual([], gen_rets:lookup(Pid2, "redink")),
+            ?assertEqual(true, gen_rets:delete(Pid2))
         end}
     ].
 

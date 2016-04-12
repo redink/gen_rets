@@ -36,8 +36,7 @@ start_link(Options) ->
 init([Options]) ->
     EtsTableName = gen_rets:get_list_item(ets_table_name, Options),
     ServerState  = gen_rets:get_list_item(server_state, Options),
-    AOFRootDir   = application:get_env(gen_rets, aof_root_dir,
-                                       "./aof_root_dir/"),
+    AOFRootDir   = get_root_dir(),
     LogDir = filename:join(AOFRootDir, erlang:atom_to_list(EtsTableName)),
     ok = filelib:ensure_dir(LogDir),
     case filelib:wildcard("*.seg", LogDir) of
@@ -123,6 +122,9 @@ code_change(_OldVsn, State, _Extra) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
+
+get_root_dir() ->
+    application:get_env(gen_rets, aof_root_dir, "./aof_root_dir/").
 
 recover_table_data(LogDir, ServerState) ->
     ReadCur = gululog_r_cur:open(LogDir, 0),
