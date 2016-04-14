@@ -23,8 +23,7 @@
 -callback handle_delete_log(map()) -> ok.
 -callback handle_terminate(map()) -> ok.
 
--define(SERVER, ?MODULE).
--define(HIBERNATE_TIMEOUT, 10000).
+-define(HIBERNATE_TIMEOUT, 1000).
 
 %%%===================================================================
 %%% API
