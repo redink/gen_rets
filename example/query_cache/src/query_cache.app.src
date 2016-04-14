@@ -1,0 +1,12 @@
+{application, query_cache,
+ [
+  {description, ""},
+  {vsn, "1"},
+  {registered, []},
+  {applications, [
+                  kernel,
+                  stdlib
+                 ]},
+  {mod, { query_cache_app, []}},
+  {env, []}
+ ]}.
