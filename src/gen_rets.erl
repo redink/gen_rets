@@ -158,6 +158,7 @@ start(Options) ->
 %%%===================================================================
 
 init([Options]) ->
+    _ = erlang:process_flag(trap_exit, true),
     ExpireMode    = get_list_item(expire_mode   , Options, fifo),
     MaxSize       = get_list_item(max_size      , Options, 100000),
     HighWaterSize = get_list_item(highwater_size, Options, 70000),
