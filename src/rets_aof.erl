@@ -8,18 +8,18 @@
 %%%-------------------------------------------------------------------
 -module(rets_aof).
 
--behaviour(gen_server).
+-behaviour(rets_persistence).
 
 %% API
 -export([start_link/1]).
 
-%% gen_server callbacks
--export([init/1, handle_call/3, handle_cast/2, handle_info/2,
-         terminate/2, code_change/3]).
-
--define(SERVER, ?MODULE).
-
--define(HIBERNATE_TIMEOUT, 10000).
+%% rets_persistence callbacks
+-export([ handle_recover/1
+        , handle_log_entry/2
+        , handle_clean_log/1
+        , handle_delete_log/1
+        , handle_terminate/1
+        ]).
 
 %%%===================================================================
 %%% API
@@ -27,13 +27,13 @@
 
 %%--------------------------------------------------------------------
 start_link(Options) ->
-    gen_server:start_link(?MODULE, [Options], []).
+    rets_persistence:start_link(?MODULE, [Options], []).
 
 %%%===================================================================
 %%% gen_server callbacks
 %%%===================================================================
 
-init([Options]) ->
+handle_recover(Options) ->
     EtsTableName = gen_rets:get_list_item(ets_table_name, Options),
     ServerState  = gen_rets:get_list_item(server_state, Options),
     AOFRootDir   = get_root_dir(),
@@ -55,69 +55,41 @@ init([Options]) ->
     LogTopic = gululog_topic:init(LogDir, [{cache_policy, minimum}]),
     {ok, #{ log_topic => LogTopic
           , log_dir   => LogDir
-          , ets_table_name => EtsTableName}, ?HIBERNATE_TIMEOUT}.
+          , ets_table_name => EtsTableName}}.
 
 %%--------------------------------------------------------------------
-handle_call({aof, EtsTableName, FunName, Args}, _From,
-            #{ ets_table_name := EtsTableName
-             , log_topic := LogTopic} = State) ->
-    Header = erlang:atom_to_binary(EtsTableName, utf8),
-    Body   = generate_body(FunName, Args),
+handle_log_entry({aof, EtsTableName, FunName, Args},
+                 #{ ets_table_name := EtsTableName
+                  , log_topic      := LogTopic} = ModState) ->
+    Header   = erlang:atom_to_binary(EtsTableName, utf8),
+    Body     = generate_body(FunName, Args),
     NewTopic = gululog_topic:append(LogTopic, Header, Body),
-    {reply, ok, State#{log_topic := NewTopic}, ?HIBERNATE_TIMEOUT};
+    {ok, ModState#{log_topic := NewTopic}};
 
-handle_call(_Request, _From, State) ->
-    {reply, ok, State, ?HIBERNATE_TIMEOUT}.
-
-%%--------------------------------------------------------------------
-handle_cast(_Msg, State) ->
-    {noreply, State, ?HIBERNATE_TIMEOUT}.
+handle_log_entry(_, ModState) ->
+    {ok, ModState}.
 
 %%--------------------------------------------------------------------
-handle_info({aof, _, clean_aof_log, _},
-            #{ log_topic := LogTopic
-             , log_dir   := LogDir} = State) ->
+handle_clean_log(#{ log_topic := LogTopic
+                  , log_dir := LogDir} = ModState) ->
     ok = gululog_topic:close(LogTopic),
     [ok = file:delete(filename:join(LogDir, File))
      || File <- filelib:wildcard("*", LogDir)],
     ok = file:del_dir(LogDir),
     ok = filelib:ensure_dir(LogDir),
     NewTopic = gululog_topic:init(LogDir, [{cache_policy, minimum}]),
-    {noreply, State#{log_topic := NewTopic}, ?HIBERNATE_TIMEOUT};
-
-handle_info({aof, _, delete_aof_log, _},
-            #{log_dir   := LogDir} = State) ->
-    [ok = file:delete(filename:join(LogDir, File))
-     || File <- filelib:wildcard("*", LogDir)],
-    {stop, normal, State};
-
-handle_info({aof, _, close_aof_log, _}, State) ->
-    {stop, normal, State};
-
-handle_info({aof, EtsTableName, FunName, Args},
-            #{ ets_table_name := EtsTableName
-             , log_topic := LogTopic} = State) ->
-    Header = erlang:atom_to_binary(EtsTableName, utf8),
-    Body   = generate_body(FunName, Args),
-    NewTopic = gululog_topic:append(LogTopic, Header, Body),
-    {noreply, State#{log_topic := NewTopic}, ?HIBERNATE_TIMEOUT};
-
-handle_info(timeout, State) ->
-    proc_lib:hibernate(gen_server, enter_loop,
-               [?MODULE, [], State]),
-    {noreply, State, ?HIBERNATE_TIMEOUT};
-
-handle_info(_Info, State) ->
-    {noreply, State, ?HIBERNATE_TIMEOUT}.
+    {ok, ModState#{log_topic := NewTopic}}.
 
 %%--------------------------------------------------------------------
-terminate(_Reason, #{log_topic := LogTopic} = _State) ->
-    ok = gululog_topic:close(LogTopic),
+handle_delete_log(#{log_dir := LogDir}) ->
+    [ok = file:delete(filename:join(LogDir, File))
+     || File <- filelib:wildcard("*", LogDir)],
     ok.
 
 %%--------------------------------------------------------------------
-code_change(_OldVsn, State, _Extra) ->
-    {ok, State}.
+handle_terminate(#{log_topic := LogTopic} = _State) ->
+    ok = gululog_topic:close(LogTopic),
+    ok.
 
 %%%===================================================================
 %%% Internal functions
