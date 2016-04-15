@@ -12,7 +12,7 @@ buffer_request(SvrName, Key, {Mod, Fun, Args}) ->
 buffer_request(SvrName, Key, NoCacheMFA) ->
     case catch buffer_instance:get_cache(SvrName, Key) of
         [] ->
-            buffer_request(buffer_instance:query_ing(SvrName, Key),
+            buffer_request(buffer_instance:execute_ing(SvrName, Key),
                            Key, SvrName, NoCacheMFA);
         [{Key, ing, _, _}] ->
             {_, _, _, WaitTimeout} = NoCacheMFA,
@@ -29,12 +29,13 @@ buffer_request(SvrName, Key, NoCacheMFA) ->
 buffer_request(execute, Key, SvrName, {Mod, Fun, Args, WaitTimeout}) ->
     case erlang:apply(Mod, Fun, Args) of
         {cache, Result} ->
-            buffer_instance:query_ed(SvrName, Key, Result),
-            waiting_for_cache_ing(WaitTimeout);
+            buffer_instance:execute_ed(SvrName, Key, Result);
         {_, Result} ->
-            buffer_instance:query_ed_no(SvrName, Key, Result),
-            waiting_for_cache_ing(WaitTimeout)
-    end;
+            buffer_instance:execute_ed_no(SvrName, Key, Result);
+        Result ->
+            buffer_instance:execute_ed_no(SvrName, Key, Result)
+    end,
+    waiting_for_cache_ing(WaitTimeout);
 buffer_request(waiting, _, _, {_, _, _, WaitTimeout}) ->
     waiting_for_cache_ing(WaitTimeout).
 
