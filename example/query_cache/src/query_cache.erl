@@ -12,16 +12,8 @@ request_query(SvrName, Key, {Mod, Fun, Args}) ->
 request_query(SvrName, Key, NoCacheMFA) ->
     case catch query_cache_instance:get_cache(SvrName, Key) of
         [] ->
-            true = query_cache_instance:query_ing(SvrName, Key),
-            {Mod, Fun, Args, _} = NoCacheMFA,
-            case erlang:apply(Mod, Fun, Args) of
-                {cache, Result} ->
-                    query_cache_instance:query_ed(SvrName, Key, Result),
-                    Result;
-                {_, Result} ->
-                    query_cache_instance:query_ed_no(SvrName, Key, Result),
-                    Result
-            end;
+            request_query(query_cache_instance:query_ing(SvrName, Key),
+                          Key, SvrName, NoCacheMFA);
         [{Key, ing, _, _}] ->
             {_, _, _, WaitTimeout} = NoCacheMFA,
             query_cache_instance:add_wait_proc(SvrName, Key, self()),
@@ -34,9 +26,21 @@ request_query(SvrName, Key, NoCacheMFA) ->
             Result
     end.
 
+request_query(execute, Key, SvrName, {Mod, Fun, Args, WaitTimeout}) ->
+    case erlang:apply(Mod, Fun, Args) of
+        {cache, Result} ->
+            query_cache_instance:query_ed(SvrName, Key, Result),
+            waiting_for_cache_ing(WaitTimeout);
+        {_, Result} ->
+            query_cache_instance:query_ed_no(SvrName, Key, Result),
+            waiting_for_cache_ing(WaitTimeout)
+    end;
+request_query(waiting, _, _, {_, _, _, WaitTimeout}) ->
+    waiting_for_cache_ing(WaitTimeout).
+
 waiting_for_cache_ing(WaitTimeout) ->
     receive
-        Result ->
+        {'__buffer_return__', Result} ->
             Result
     after WaitTimeout ->
             timeout
