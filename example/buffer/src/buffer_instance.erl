@@ -20,7 +20,7 @@
         ]).
 
 %% nonblock API
--export([nonblock_get_cache/3]).
+-export([nonblock_get_cache/4]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
@@ -67,7 +67,7 @@ init([CacheOptions]) ->
 handle_call({get_cache, UNKey}, From,
             #{ etstable := EtsTable} = State) ->
     proc_lib:spawn_link(?MODULE, nonblock_get_cache,
-                        [EtsTable, UNKey, From]),
+                        [erlang:self(), EtsTable, UNKey, From]),
     {noreply, State, ?HIBERNATE_TIMEOUT};
 
 handle_call({execute_ing, UNKey}, {Pid, _},
@@ -157,7 +157,7 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%%===================================================================
 
-nonblock_get_cache(EtsTable, UNKey, From) ->
+nonblock_get_cache(ParentPid, EtsTable, UNKey, From) ->
     Key = lz4_pack(UNKey),
     Return =
         case catch ets:lookup(EtsTable, Key) of
@@ -169,6 +169,7 @@ nonblock_get_cache(EtsTable, UNKey, From) ->
                 Other
         end,
     gen_server:reply(From, Return),
+    true = erlang:unlink(ParentPid),
     ok.
 
 block_add_wait_proc(EtsTable, UNKey, WaitProc) ->
