@@ -6,7 +6,7 @@
 %%% @end
 %%% Created : by redink simofo_sup's template
 %%%-------------------------------------------------------------------
--module(query_cache_tmp_sup).
+-module(buffer_tmp_sup).
 
 -behaviour(supervisor).
 

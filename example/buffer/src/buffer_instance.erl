@@ -6,16 +6,16 @@
 %%% @end
 %%% Created :  by redink
 %%%-------------------------------------------------------------------
--module(query_cache_instance).
+-module(buffer_instance).
 
 -behaviour(gen_server).
 
 %% API
 -export([ start_link/2
         , get_cache/2
-        , query_ing/2
-        , query_ed/3
-        , query_ed_no/3
+        , execute_ing/2
+        , execute_ed/3
+        , execute_ed_no/3
         , add_wait_proc/3
         ]).
 
@@ -37,14 +37,14 @@
 get_cache(SvrName, Key) ->
     gen_server:call(SvrName, {get_cache, Key}).
 
-query_ing(SvrName, Key) ->
-    gen_server:call(SvrName, {query_ing, Key}).
+execute_ing(SvrName, Key) ->
+    gen_server:call(SvrName, {execute_ing, Key}).
 
-query_ed(SvrName, Key, QueryResult) ->
-    gen_server:call(SvrName, {query_ed, Key, QueryResult}).
+execute_ed(SvrName, Key, ExecuteResult) ->
+    gen_server:call(SvrName, {execute_ed, Key, ExecuteResult}).
 
-query_ed_no(SvrName, Key, QueryResult) ->
-    gen_server:call(SvrName, {query_ed_no, Key, QueryResult}).
+execute_ed_no(SvrName, Key, ExecuteResult) ->
+    gen_server:call(SvrName, {execute_ed_no, Key, ExecuteResult}).
 
 add_wait_proc(SvrName, Key, WaitProc) ->
     gen_server:call(SvrName, {add_wait_proc, Key, WaitProc}).
@@ -70,7 +70,7 @@ handle_call({get_cache, UNKey}, From,
                         [EtsTable, UNKey, From]),
     {noreply, State, ?HIBERNATE_TIMEOUT};
 
-handle_call({query_ing, UNKey}, {Pid, _},
+handle_call({execute_ing, UNKey}, {Pid, _},
             #{ etspid := EtsPid
              , etstable := EtsTable} = State) ->
     Key  = lz4_pack(UNKey),
@@ -85,7 +85,7 @@ handle_call({query_ing, UNKey}, {Pid, _},
         end,
     {reply, R, State, ?HIBERNATE_TIMEOUT};
 
-handle_call({query_ed, UNKey, QueryResult}, _From,
+handle_call({execute_ed, UNKey, ExecuteResult}, _From,
             #{etspid := EtsPid} = State) ->
     Key = lz4_pack(UNKey),
     case catch gen_rets:lookup(EtsPid, Key) of
@@ -93,18 +93,18 @@ handle_call({query_ed, UNKey, QueryResult}, _From,
             F =
                 fun() ->
                     [erlang:send(WaitProc,
-                                 {'__buffer_return__', QueryResult})
+                                 {'__buffer_return__', ExecuteResult})
                      || WaitProc <- WaitingList]
                 end,
             proc_lib:spawn(F),
-            handle_query_ed(EtsPid, Key, QueryResult),
+            handle_execute_ed(EtsPid, Key, ExecuteResult),
             ok;
         _ ->
             ok
     end,
     {reply, ok, State, ?HIBERNATE_TIMEOUT};
 
-handle_call({query_ed_no, UNKey, QueryResult}, _From,
+handle_call({execute_ed_no, UNKey, ExecuteResult}, _From,
             #{etspid := EtsPid} = State) ->
     Key = lz4_pack(UNKey),
     case catch gen_rets:lookup(EtsPid, Key) of
@@ -112,7 +112,7 @@ handle_call({query_ed_no, UNKey, QueryResult}, _From,
             F =
                 fun() ->
                     [erlang:send(WaitProc,
-                                 {'__buffer_return__', QueryResult})
+                                 {'__buffer_return__', ExecuteResult})
                      || WaitProc <- WaitingList]
                 end,
             proc_lib:spawn(F),
@@ -176,8 +176,8 @@ block_add_wait_proc(EtsTable, UNKey, WaitProc) ->
     case ets:lookup(EtsTable, Key) of
         [] ->
             ok;
-        [{Key, ed, _, QueryResult}] ->
-            erlang:send(WaitProc, lz4_unpack(QueryResult));
+        [{Key, ed, _, ExecuteResult}] ->
+            erlang:send(WaitProc, lz4_unpack(ExecuteResult));
         [{Key, ing, WaitingList, _}] ->
             insert_waitinglist(EtsTable, Key, WaitingList, WaitProc);
         _ ->
@@ -195,8 +195,8 @@ insert_waitinglist(EtsTable, Key, WaitingList, WaitProc) ->
     end,
     ok.
 
-handle_query_ed(EtsPid, Key, QueryResult) ->
-    InsertObject = {Key, ed, [], lz4_pack(QueryResult)},
+handle_execute_ed(EtsPid, Key, ExecuteResult) ->
+    InsertObject = {Key, ed, [], lz4_pack(ExecuteResult)},
     true = gen_rets:insert(EtsPid, InsertObject, {hour, 12}),
     ok.
 

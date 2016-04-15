@@ -1,4 +1,4 @@
--module(query_cache_sup).
+-module(buffer_sup).
 
 -behaviour(supervisor).
 
@@ -23,10 +23,10 @@ start_link() ->
 %% ===================================================================
 
 init([]) ->
-    QueryCacheInstance =
-        {query_cache_instance_sup,
-         {query_cache_tmp_sup, start_link, [query_cache_instance_sup,
-                                            query_cache_instance]},
-         permanent, 5000, supervisor, [query_cache_tmp_sup]},
-    {ok, { {one_for_one, 5, 10}, [QueryCacheInstance]} }.
+    BufferInstance =
+        {buffer_instance_sup,
+         {buffer_tmp_sup, start_link, [buffer_instance_sup,
+                                       buffer_instance]},
+         permanent, 5000, supervisor, [buffer_tmp_sup]},
+    {ok, { {one_for_one, 5, 10}, [BufferInstance]} }.
 
