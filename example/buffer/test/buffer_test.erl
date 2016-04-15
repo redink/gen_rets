@@ -53,4 +53,5 @@ buffer_test_help(Tag, Key, HelpEts) ->
     timer:sleep(2000),
     _ = ets:insert(HelpEts, {Key, 0}),
     _ = ets:update_counter(HelpEts, Key, 1),
-    {Tag, os:system_time()}.
+    {X1, X2, X3} = os:timestamp(),
+    {Tag, X1 * 1000000000000 + X2 * 1000000 + X3}.
