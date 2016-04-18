@@ -34,18 +34,23 @@
 %%%===================================================================
 
 %%--------------------------------------------------------------------
+-spec get_cache(atom() | pid(), term()) -> [tuple()].
 get_cache(SvrName, Key) ->
     gen_server:call(SvrName, {get_cache, Key}).
 
+-spec execute_ing(atom() | pid(), term()) -> execute | waiting.
 execute_ing(SvrName, Key) ->
     gen_server:call(SvrName, {execute_ing, Key}).
 
+-spec execute_ed(atom() | pid(), term(), term()) -> ok.
 execute_ed(SvrName, Key, ExecuteResult) ->
     gen_server:call(SvrName, {execute_ed, Key, ExecuteResult}).
 
+-spec execute_ed_no(atom() | pid(), term(), term()) -> ok.
 execute_ed_no(SvrName, Key, ExecuteResult) ->
     gen_server:call(SvrName, {execute_ed_no, Key, ExecuteResult}).
 
+-spec add_wait_proc(atom() | pid(), term(), pid()) -> ok.
 add_wait_proc(SvrName, Key, WaitProc) ->
     gen_server:call(SvrName, {add_wait_proc, Key, WaitProc}).
 
@@ -156,7 +161,8 @@ code_change(_OldVsn, State, _Extra) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
-
+-spec nonblock_get_cache(pid(), ets:tid() | atom(), term(),
+                         {pid(), reference()}) -> ok.
 nonblock_get_cache(ParentPid, EtsTable, UNKey, From) ->
     Key = lz4_pack(UNKey),
     Return =
@@ -172,6 +178,7 @@ nonblock_get_cache(ParentPid, EtsTable, UNKey, From) ->
     true = erlang:unlink(ParentPid),
     ok.
 
+-spec block_add_wait_proc(ets:tid() | atom(), term(), pid()) -> ok.
 block_add_wait_proc(EtsTable, UNKey, WaitProc) ->
     Key = lz4_pack(UNKey),
     case ets:lookup(EtsTable, Key) of
@@ -186,6 +193,7 @@ block_add_wait_proc(EtsTable, UNKey, WaitProc) ->
     end,
     ok.
 
+-spec insert_waitinglist(ets:tid() | atom(), term(), list(), pid()) -> ok.
 insert_waitinglist(EtsTable, Key, WaitingList, WaitProc) ->
     case lists:member(WaitProc, WaitingList) of
         true ->
@@ -196,15 +204,18 @@ insert_waitinglist(EtsTable, Key, WaitingList, WaitProc) ->
     end,
     ok.
 
+-spec handle_execute_ed(pid() | atom(), term(), term()) -> ok.
 handle_execute_ed(EtsPid, Key, ExecuteResult) ->
     InsertObject = {Key, ed, [], lz4_pack(ExecuteResult)},
     true = gen_rets:insert(EtsPid, InsertObject, {hour, 12}),
     ok.
 
+-spec lz4_pack(term()) -> binary().
 lz4_pack(Data) ->
     {ok, Pack} = lz4:pack(erlang:term_to_binary(Data)),
     Pack.
 
+-spec lz4_unpack(binary()) -> term().
 lz4_unpack(Data) ->
     {ok, BinData} = lz4:unpack(Data),
     erlang:binary_to_term(BinData).
