@@ -20,7 +20,7 @@
         ]).
 
 %% nonblock API
--export([nonblock_get_cache/4]).
+-export([nonblock_get_cache/5]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
@@ -66,34 +66,42 @@ init([CacheOptions]) ->
     _ = erlang:process_flag(trap_exit, true),
     {ok, EtsPid} = gen_rets:start_link(CacheOptions),
     EtsTable     = gen_rets:get_ets(EtsPid),
-    {ok, #{etspid => EtsPid, etstable => EtsTable}, ?HIBERNATE_TIMEOUT}.
+    {ok, IngEtsPid} = gen_rets:start_link([{expire_mode, none},
+                                           {new_ets_options, [public]}]),
+    IngEtsTable     = gen_rets:get_ets(IngEtsPid),
+    {ok, #{ etspid => EtsPid
+          , etstable => EtsTable
+          , ingetspid => IngEtsPid
+          , ingetstable => IngEtsTable}, ?HIBERNATE_TIMEOUT}.
 
 %%--------------------------------------------------------------------
 handle_call({get_cache, UNKey}, From,
-            #{ etstable := EtsTable} = State) ->
+            #{ etstable := EtsTable
+             , ingetstable := IngEtsTable} = State) ->
     proc_lib:spawn_link(?MODULE, nonblock_get_cache,
-                        [erlang:self(), EtsTable, UNKey, From]),
+                        [erlang:self(), EtsTable, IngEtsTable, UNKey, From]),
     {noreply, State, ?HIBERNATE_TIMEOUT};
 
 handle_call({execute_ing, UNKey}, {Pid, _},
-            #{ etspid := EtsPid
-             , etstable := EtsTable} = State) ->
-    Key  = lz4_pack(UNKey),
+            #{ ingetspid := IngEtsPid
+             , ingetstable := IngEtsTable} = State) ->
+    Key = lz4_pack(UNKey),
     R =
-        case ets:lookup(EtsTable, Key) of
+        case ets:lookup(IngEtsTable, Key) of
             [] ->
-                true = gen_rets:insert(EtsPid, {Key, ing, [Pid], []}),
+                true = gen_rets:insert(IngEtsPid, {Key, ing, [Pid], []}),
                 execute;
             [{Key, ing, WaitingList, _}] ->
-                insert_waitinglist(EtsTable, Key, WaitingList, Pid),
+                insert_waitinglist(IngEtsTable, Key, WaitingList, Pid),
                 waiting
         end,
     {reply, R, State, ?HIBERNATE_TIMEOUT};
 
 handle_call({execute_ed, UNKey, ExecuteResult}, _From,
-            #{etspid := EtsPid} = State) ->
+            #{ etspid := EtsPid
+             , ingetspid := IngEtsPid} = State) ->
     Key = lz4_pack(UNKey),
-    case catch gen_rets:lookup(EtsPid, Key) of
+    case catch gen_rets:lookup(IngEtsPid, Key) of
         [{Key, ing, WaitingList, _}] ->
             F =
                 fun() ->
@@ -107,12 +115,13 @@ handle_call({execute_ed, UNKey, ExecuteResult}, _From,
         _ ->
             ok
     end,
+    gen_rets:delete(IngEtsPid, Key),
     {reply, ok, State, ?HIBERNATE_TIMEOUT};
 
 handle_call({execute_ed_no, UNKey, ExecuteResult}, _From,
-            #{etspid := EtsPid} = State) ->
+            #{ingetspid := IngEtsPid} = State) ->
     Key = lz4_pack(UNKey),
-    case catch gen_rets:lookup(EtsPid, Key) of
+    case catch gen_rets:lookup(IngEtsPid, Key) of
         [{Key, ing, WaitingList, _}] ->
             F =
                 fun() ->
@@ -125,12 +134,12 @@ handle_call({execute_ed_no, UNKey, ExecuteResult}, _From,
         _ ->
             ok
     end,
-    gen_rets:delete(EtsPid, Key),
+    gen_rets:delete(IngEtsPid, Key),
     {reply, ok, State, ?HIBERNATE_TIMEOUT};
 
 handle_call({add_wait_proc, UNKey, WaitProc}, _From,
-            #{etstable := EtsTable} = State) ->
-    block_add_wait_proc(EtsTable, UNKey, WaitProc),
+            #{ingetstable := IngEtsTable} = State) ->
+    block_add_wait_proc(IngEtsTable, UNKey, WaitProc),
     {reply, ok, State, ?HIBERNATE_TIMEOUT};
 
 handle_call(_Request, _From, State) ->
@@ -150,8 +159,10 @@ handle_info(_Info, State) ->
     {noreply, State, ?HIBERNATE_TIMEOUT}.
 
 %%--------------------------------------------------------------------
-terminate(_Reason, #{etspid := EtsPid} = _State) ->
+terminate(_Reason, #{ etspid := EtsPid
+                    , ingetspid := IngEtsPid} = _State) ->
     true = gen_rets:delete(EtsPid),
+    true = gen_rets:delete(IngEtsPid),
     ok.
 
 %%--------------------------------------------------------------------
@@ -161,45 +172,38 @@ code_change(_OldVsn, State, _Extra) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
--spec nonblock_get_cache(pid(), ets:tid() | atom(), term(),
-                         {pid(), reference()}) -> ok.
-nonblock_get_cache(ParentPid, EtsTable, UNKey, From) ->
+-spec nonblock_get_cache(pid(), ets:tid() | atom(), ets:tid() | atom(),
+                         term(), {pid(), reference()}) -> ok.
+nonblock_get_cache(ParentPid, EtsTable, IngEtsTable, UNKey, From) ->
     Key = lz4_pack(UNKey),
-    Return =
-        case catch ets:lookup(EtsTable, Key) of
-            [{Data, ed, X3, X4}] ->
-                [{lz4_unpack(Data), ed, X3, lz4_unpack(X4)}];
-            [{Data, X2, X3, X4}] ->
-                [{lz4_unpack(Data), X2, X3, X4}];
-            Other ->
-                Other
-        end,
-    gen_server:reply(From, Return),
+    Return = nonblock_get_cache(EtsTable, Key),
+    IngReturn = nonblock_get_cache(IngEtsTable, Key),
+    gen_server:reply(From, Return ++ IngReturn),
     true = erlang:unlink(ParentPid),
     ok.
 
 -spec block_add_wait_proc(ets:tid() | atom(), term(), pid()) -> ok.
-block_add_wait_proc(EtsTable, UNKey, WaitProc) ->
+block_add_wait_proc(IngEtsTable, UNKey, WaitProc) ->
     Key = lz4_pack(UNKey),
-    case ets:lookup(EtsTable, Key) of
+    case ets:lookup(IngEtsTable, Key) of
         [] ->
             ok;
         [{Key, ed, _, ExecuteResult}] ->
             erlang:send(WaitProc, lz4_unpack(ExecuteResult));
         [{Key, ing, WaitingList, _}] ->
-            insert_waitinglist(EtsTable, Key, WaitingList, WaitProc);
+            insert_waitinglist(IngEtsTable, Key, WaitingList, WaitProc);
         _ ->
             ok
     end,
     ok.
 
 -spec insert_waitinglist(ets:tid() | atom(), term(), list(), pid()) -> ok.
-insert_waitinglist(EtsTable, Key, WaitingList, WaitProc) ->
+insert_waitinglist(IngEtsTable, Key, WaitingList, WaitProc) ->
     case lists:member(WaitProc, WaitingList) of
         true ->
             ok;
         _ ->
-            ets:update_element(EtsTable, Key,
+            ets:update_element(IngEtsTable, Key,
                                {3, [WaitProc | WaitingList]})
     end,
     ok.
@@ -209,6 +213,17 @@ handle_execute_ed(EtsPid, Key, ExecuteResult) ->
     InsertObject = {Key, ed, [], lz4_pack(ExecuteResult)},
     true = gen_rets:insert(EtsPid, InsertObject, {hour, 12}),
     ok.
+
+-spec nonblock_get_cache(ets:tid() | atom(), term()) -> term().
+nonblock_get_cache(EtsTable, Key) ->
+    case catch ets:lookup(EtsTable, Key) of
+        [{Data, ed, X3, X4}] ->
+            [{lz4_unpack(Data), ed, X3, lz4_unpack(X4)}];
+        [{Data, X2, X3, X4}] ->
+            [{lz4_unpack(Data), X2, X3, X4}];
+        Other ->
+            Other
+    end.
 
 -spec lz4_pack(term()) -> binary().
 lz4_pack(Data) ->
