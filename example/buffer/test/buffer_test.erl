@@ -43,7 +43,37 @@ buffer_test_() ->
                 ?assertEqual(Result,
                              buffer:buffer_request('one_buffer_instance', key,
                                                    {?MODULE, buffer_test_help,
-                                                    [cache, key, HelpEts]}))
+                                                    [cache, key, HelpEts]})),
+                application:stop(buffer)
+            end}
+         , {"cache test with fifo", timeout, 100,
+            fun() ->
+                CacheOptions = [{new_ets_options, [public]}, {max_size, 6}, {highwater_size, 6}],
+                {ok, _} = application:ensure_all_started(buffer),
+                {ok, Pid} = buffer:start_instance('one_buffer_instance', CacheOptions),
+                IngEtsTable = maps:get(ingetstable, sys:get_state(Pid)),
+                EtsTable    = maps:get(etstable   , sys:get_state(Pid)),
+                HelpEts = ets:new(help_ets, [public]),
+                F =
+                    fun(Key) ->
+                        TaskRefList =
+                            [task:async(buffer, buffer_request,
+                                        ['one_buffer_instance', Key,
+                                         {?MODULE, buffer_test_help, [cache, Key, HelpEts]}])
+                             || _ <- lists:seq(1, 100)],
+                        ResList = lists:usort([task:await(TaskRef) || TaskRef <- TaskRefList]),
+                        ?assertEqual(1, erlang:length(lists:usort(ResList))),
+                        ?assertEqual([{Key, 1}], ets:lookup(HelpEts, Key)),
+                        ok
+                    end,
+                TaskRefList =
+                    [task:async(erlang, apply, [F, [K]]) || K <- lists:seq(1, 10)],
+                timer:sleep(1000),
+                ?assertEqual(10, ets:info(IngEtsTable, size)),
+                [ok = task:await(TaskRef) || TaskRef <- TaskRefList],
+                timer:sleep(5000),
+                ?assertEqual(6, ets:info(EtsTable, size)),
+                application:stop(buffer)
             end}
          ]
      end
