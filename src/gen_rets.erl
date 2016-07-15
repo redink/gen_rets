@@ -1,11 +1,27 @@
-%%%-------------------------------------------------------------------
-%%% @author redink
-%%% @copyright (C) , redink
-%%% @doc
-%%%
-%%% @end
-%%% Created :  by redink
-%%%-------------------------------------------------------------------
+%% Copyright (c) 2016
+%% redink <cnredink@gmail.com>
+%%
+%% Permission is  hereby  granted,  free of charge,  to any person
+%% obtaining  a copy of this software and associated documentation
+%% files (the "Software"),to deal in the Software without restric-
+%% tion,  including  without  limitation the rights to use,  copy,
+%% modify, merge,  publish,  distribute,  sublicense,  and/or sell
+%% copies  of the  Software,  and to  permit  persons to  whom the
+%% Software  is  furnished  to do  so,  subject  to the  following
+%% conditions:
+%%
+%% The above  copyright notice and this permission notice shall be
+%% included in all copies or substantial portions of the Software.
+%%
+%% THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+%% EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
+%% OF  MERCHANTABILITY,  FITNESS  FOR  A  PARTICULAR  PURPOSE  AND
+%% NONINFRINGEMENT. IN  NO  EVENT  SHALL  THE AUTHORS OR COPYRIGHT
+%% HOLDERS  BE  LIABLE FOR  ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+%% WHETHER IN AN ACTION OF CONTRACT,  TORT  OR OTHERWISE,  ARISING
+%% FROM,  OUT OF OR IN CONNECTION WITH THE SOFTWARE  OR THE USE OR
+%% OTHER DEALINGS IN THE SOFTWARE.
+
 -module(gen_rets).
 
 -behaviour(gen_server).
@@ -172,72 +188,38 @@ init([Options]) ->
           get_list_item(persistence, Options, false),
           lists:member(public, NewETSOptions)} of
         {true, false, _} ->
-            MetaTable = ets:new(ets_meta_table, [public, set, compressed]),
-            TTLTable  = ets:new(ets_ttl_table , [public, ordered_set, compressed]),
-            FIFOTable = ets:new(ets_fifo_table, [public, ordered_set, compressed]),
-            LRUTable  = ets:new(ets_lru_table , [public, ordered_set, compressed]),
-            MainTable = ets:new(EtsTableName, NewETSOptions),
+            {MetaTable, TTLTable, FIFOTable, LRUTable, MainTable} =
+                create_need_table(EtsTableName, NewETSOptions),
             erlang:send_after(timer:seconds(TimeInterval), erlang:self(), ttl_clean),
-            {ok, #{ expire_mode => ExpireMode
-                  , max_mem     => MaxMem
-                  , max_size    => MaxSize
-                  , highwater_mem  => HighWaterMem
-                  , highwater_size => HighWaterSize
-                  , deleted_key_table  => ets:new(deleted_key_table, [])
-                  , check_ttl_interval => TimeInterval
-                  , ets_main_table  => MainTable
-                  , ets_meta_table  => MetaTable
-                  , ets_ttl_table   => TTLTable
-                  , ets_fifo_table  => FIFOTable
-                  , ets_lru_table   => LRUTable
-                  , new_ets_options => NewETSOptions
-                  }, ?HIBERNATE_TIMEOUT};
+            {ok, init_state(ExpireMode, MaxMem, MaxSize,
+                            HighWaterMem, HighWaterSize,
+                            TimeInterval,
+                            MainTable, MetaTable, TTLTable, FIFOTable, LRUTable,
+                            NewETSOptions),
+             ?HIBERNATE_TIMEOUT};
         {true, aof, true} ->
-            MetaTable = ets:new(ets_meta_table, [public, set, compressed]),
-            TTLTable  = ets:new(ets_ttl_table , [public, ordered_set, compressed]),
-            FIFOTable = ets:new(ets_fifo_table, [public, ordered_set, compressed]),
-            LRUTable  = ets:new(ets_lru_table , [public, ordered_set, compressed]),
-            MainTable = ets:new(EtsTableName, NewETSOptions),
-            State     = #{ expire_mode => ExpireMode
-                         , max_mem     => MaxMem
-                         , max_size    => MaxSize
-                         , highwater_mem  => HighWaterMem
-                         , highwater_size => HighWaterSize
-                         , deleted_key_table  => ets:new(deleted_key_table, [])
-                         , check_ttl_interval => TimeInterval
-                         , ets_main_table  => MainTable
-                         , ets_meta_table  => MetaTable
-                         , ets_ttl_table   => TTLTable
-                         , ets_fifo_table  => FIFOTable
-                         , ets_lru_table   => LRUTable
-                         , new_ets_options => NewETSOptions
-                         },
+            {MetaTable, TTLTable, FIFOTable, LRUTable, MainTable} =
+                create_need_table(EtsTableName, NewETSOptions),
+            State = init_state(ExpireMode, MaxMem, MaxSize,
+                                   HighWaterMem, HighWaterSize,
+                                   TimeInterval,
+                                   MainTable, MetaTable, TTLTable, FIFOTable, LRUTable,
+                                   NewETSOptions),
             {ok, AOFPid} = rets_aof:start_link([{ets_table_name, EtsTableName},
                                                 {server_state, State}]),
             erlang:send_after(timer:seconds(TimeInterval), erlang:self(), ttl_clean),
             erlang:send(erlang:self(), refresh_main_table),
             {ok, State#{ aof_pid => AOFPid}, ?HIBERNATE_TIMEOUT};
         {false, false, _} ->
-            MetaTable = ets:new(ets_meta_table, [public, set, compressed]),
-            TTLTable  = ets:new(ets_ttl_table , [public, ordered_set, compressed]),
-            FIFOTable = ets:new(ets_fifo_table, [public, ordered_set, compressed]),
-            LRUTable  = ets:new(ets_lru_table , [public, ordered_set, compressed]),
-            MainTable = ets:new(EtsTableName, NewETSOptions),
+            {MetaTable, TTLTable, FIFOTable, LRUTable, MainTable} =
+                create_need_table(EtsTableName, NewETSOptions),
             erlang:send_after(timer:seconds(TimeInterval), erlang:self(), ttl_clean),
-            {ok, #{ expire_mode => ExpireMode
-                  , max_mem     => MaxMem
-                  , max_size    => MaxSize
-                  , highwater_mem  => HighWaterMem
-                  , highwater_size => HighWaterSize
-                  , deleted_key_table  => ets:new(deleted_key_table, [])
-                  , check_ttl_interval => TimeInterval
-                  , ets_main_table     => MainTable
-                  , ets_meta_table     => MetaTable
-                  , ets_ttl_table      => TTLTable
-                  , ets_fifo_table     => FIFOTable
-                  , ets_lru_table      => LRUTable
-                  , new_ets_options    => NewETSOptions
-                  }, ?HIBERNATE_TIMEOUT};
+            {ok, init_state(ExpireMode, MaxMem, MaxSize,
+                            HighWaterMem, HighWaterSize,
+                            TimeInterval,
+                            MainTable, MetaTable, TTLTable, FIFOTable, LRUTable,
+                            NewETSOptions),
+             ?HIBERNATE_TIMEOUT};
         _ ->
             {stop, "aof should named table or public"}
     end.
@@ -504,6 +486,40 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%%===================================================================
 
+-spec create_need_table(atom(), list()) -> tuple().
+create_need_table(EtsTableName, NewETSOptions) ->
+    { ets:new(ets_meta_table, [public, set, compressed])
+    , ets:new(ets_ttl_table , [public, ordered_set, compressed])
+    , ets:new(ets_fifo_table, [public, ordered_set, compressed])
+    , ets:new(ets_lru_table , [public, ordered_set, compressed])
+    , ets:new(EtsTableName, NewETSOptions)
+    }.
+
+-spec init_state(atom(), integer(), integer(),
+                 integer(), integer(),
+                 tuple(),
+                 ets:tid(), ets:tid(), ets:tid(), ets:tid(), ets:tid(),
+                 list()) -> map().
+init_state(ExpireMode, MaxMem, MaxSize,
+           HighWaterMem, HighWaterSize,
+           TimeInterval,
+           MainTable, MetaTable, TTLTable, FIFOTable, LRUTable,
+           NewETSOptions) ->
+    #{ expire_mode => ExpireMode
+     , max_mem     => MaxMem
+     , max_size    => MaxSize
+     , highwater_mem  => HighWaterMem
+     , highwater_size => HighWaterSize
+     , deleted_key_table  => ets:new(deleted_key_table, [])
+     , check_ttl_interval => TimeInterval
+     , ets_main_table  => MainTable
+     , ets_meta_table  => MetaTable
+     , ets_ttl_table   => TTLTable
+     , ets_fifo_table  => FIFOTable
+     , ets_lru_table   => LRUTable
+     , new_ets_options => NewETSOptions
+     }.
+
 -spec call_insert(map(), integer(), tuple() | [tuple()],
                   {sec | min | hour, integer()}) -> true.
 call_insert(#{ets_main_table := MainTable} = State,
@@ -685,12 +701,13 @@ set_ttl(Now, Objects, ServerState, TTLOption) when erlang:is_list(Objects) ->
     [ok = set_ttl(Now, Object, ServerState, TTLOption) || Object <- Objects],
     ok;
 
-set_ttl(Now, Object, ServerState, TTLOption) when erlang:is_tuple(Object) ->
-    NewETSOptions = maps:get(new_ets_options, ServerState),
-    MetaTable = maps:get(ets_meta_table, ServerState),
-    TTLTable  = maps:get(ets_ttl_table , ServerState),
-    FIFOTable = maps:get(ets_fifo_table, ServerState),
-    LRUTable  = maps:get(ets_lru_table , ServerState),
+set_ttl(Now, Object,
+        #{ new_ets_options := NewETSOptions
+         , ets_meta_table  := MetaTable
+         , ets_ttl_table   := TTLTable
+         , ets_fifo_table  := FIFOTable
+         , ets_lru_table   := LRUTable},
+        TTLOption) when erlang:is_tuple(Object) ->
     Key       = get_object_key(NewETSOptions, Object),
     TTLTime   = get_expire_time(TTLOption, Now),
     case ets:lookup(MetaTable, Key) of
@@ -712,9 +729,9 @@ set_ttl(Now, Object, ServerState, TTLOption) when erlang:is_tuple(Object) ->
     ok.
 
 -spec update_lru_time(integer(), term(), map()) -> ok.
-update_lru_time(Now, Key, ServerState) ->
-    MetaTable = maps:get(ets_meta_table, ServerState),
-    LRUTable  = maps:get(ets_lru_table , ServerState),
+update_lru_time(Now, Key,
+                #{ ets_meta_table := MetaTable
+                 , ets_lru_table := LRUTable}) ->
     [{Key, OldTTLTime, OldInsertTime, OldUpdateTime}] =
         ets:lookup(MetaTable, Key),
     true = ets:delete(LRUTable, {OldUpdateTime, Key}),
@@ -744,9 +761,8 @@ clean_unuse_via_ttl({TTLTime, OriginKey} = Key, TTLTable,
             ok
     end.
 
-clean_single_key_via_fifo(ServerState) ->
-    FIFOTable = maps:get(ets_fifo_table, ServerState),
-    MainTable = maps:get(ets_main_table, ServerState),
+clean_single_key_via_fifo(#{ ets_fifo_table := FIFOTable
+                           , ets_main_table := MainTable} = ServerState) ->
     case ets:first(FIFOTable) of
         '$end_of_table' ->
             ignore;
@@ -756,9 +772,8 @@ clean_single_key_via_fifo(ServerState) ->
     end,
     ServerState.
 
-clean_single_key_via_lru(ServerState) ->
-    LRUTable  = maps:get(ets_lru_table , ServerState),
-    MainTable = maps:get(ets_main_table, ServerState),
+clean_single_key_via_lru(#{ ets_lru_table  := LRUTable
+                          , ets_main_table := MainTable} = ServerState) ->
     case ets:first(LRUTable) of
         '$end_of_table' ->
             ignore;
@@ -771,11 +786,11 @@ clean_single_key_via_lru(ServerState) ->
 clean_other_table_via_key(OriginKey, ServerState) ->
     clean_other_table_via_key(log_deleted_key, OriginKey, ServerState).
 
-clean_other_table_via_key(IsLog, OriginKey, ServerState) ->
-    MetaTable = maps:get(ets_meta_table, ServerState),
-    TTLTable  = maps:get(ets_ttl_table , ServerState),
-    FIFOTable = maps:get(ets_fifo_table, ServerState),
-    LRUTable  = maps:get(ets_lru_table , ServerState),
+clean_other_table_via_key(IsLog, OriginKey,
+                          #{ ets_meta_table  := MetaTable
+                           , ets_ttl_table   := TTLTable
+                           , ets_fifo_table  := FIFOTable
+                           , ets_lru_table   := LRUTable}) ->
     case ets:lookup(MetaTable, OriginKey) of
         [] ->
             ignore;
@@ -950,11 +965,10 @@ gen_rets_test_() ->
             ?assertEqual(-1, gen_rets:reset_ttl(Pid, fake_key, {sec, 10})),
             ?assertEqual(true, gen_rets:insert(Pid, {akey, avalue}, {sec, 5})),
             Now = get_now(),
-            ServerState = sys:get_state(Pid),
-            MetaTable = maps:get(ets_meta_table, ServerState),
-            TTLTable  = maps:get(ets_ttl_table , ServerState),
-            FIFOTable = maps:get(ets_fifo_table, ServerState),
-            LRUTable  = maps:get(ets_lru_table , ServerState),
+            #{ ets_meta_table  := MetaTable
+             , ets_ttl_table   := TTLTable
+             , ets_fifo_table  := FIFOTable
+             , ets_lru_table   := LRUTable} = sys:get_state(Pid),
             [{akey, TTLTime, InsertTime, UpdateTime}] = ets:lookup(MetaTable, akey),
             ?assertEqual(true, Now + 5 - TTLTime =< 1),
             ?assertEqual(TTLTime, InsertTime + 5),
@@ -996,11 +1010,10 @@ gen_rets_test_() ->
             ?assertEqual([], gen_rets:lookup(Pid, bkey)),
             ?assertEqual([{ckey, avalue}], gen_rets:lookup(Pid, ckey)),
             ?assertEqual([{dkey, avalue}], gen_rets:lookup(Pid, dkey)),
-            ServerState = sys:get_state(Pid),
-            MetaTable = maps:get(ets_meta_table, ServerState),
-            TTLTable  = maps:get(ets_ttl_table , ServerState),
-            FIFOTable = maps:get(ets_fifo_table, ServerState),
-            LRUTable  = maps:get(ets_lru_table , ServerState),
+            #{ ets_meta_table := MetaTable
+             , ets_ttl_table  := TTLTable
+             , ets_fifo_table := FIFOTable
+             , ets_lru_table  := LRUTable} = sys:get_state(Pid),
             ?assertEqual([], ets:lookup(MetaTable, akey)),
             ?assertEqual(2, ets:info(MetaTable, size)),
             ?assertEqual(2, ets:info(TTLTable , size)),
@@ -1029,11 +1042,10 @@ gen_rets_test_() ->
             gen_rets:insert(Pid, {ckey, avalue}, {sec, 20}),
             gen_rets:insert(Pid, {dkey, avalue}, {sec, 20}),
             gen_rets:insert(Pid, {ekey, avalue}, {sec, 20}),
-            ServerState = sys:get_state(Pid),
-            MetaTable = maps:get(ets_meta_table, ServerState),
-            TTLTable  = maps:get(ets_ttl_table , ServerState),
-            FIFOTable = maps:get(ets_fifo_table, ServerState),
-            LRUTable  = maps:get(ets_lru_table , ServerState),
+            #{ ets_meta_table := MetaTable
+             , ets_ttl_table  := TTLTable
+             , ets_fifo_table := FIFOTable
+             , ets_lru_table  := LRUTable} = sys:get_state(Pid),
             timer:sleep(timer:seconds(1)),
             ?assertEqual([{akey, avalue}], gen_rets:lookup(Pid, akey)),
             ?assertEqual([{bkey, avalue}], gen_rets:lookup(Pid, bkey)),
@@ -1104,12 +1116,11 @@ gen_rets_test_() ->
             ?assertEqual(true, gen_rets:delete_object(Pid, {c, v1})),
             ?assertEqual(true, gen_rets:delete_object(Pid, {a, v1})),
             ?assertEqual([{a, v2}], gen_rets:lookup(Pid, a)),
-            ServerState = sys:get_state(Pid),
-            MainTable = maps:get(ets_main_table, ServerState),
-            MetaTable = maps:get(ets_meta_table, ServerState),
-            TTLTable  = maps:get(ets_ttl_table , ServerState),
-            FIFOTable = maps:get(ets_fifo_table, ServerState),
-            LRUTable  = maps:get(ets_lru_table , ServerState),
+            #{ ets_meta_table := MetaTable
+             , ets_ttl_table  := TTLTable
+             , ets_fifo_table := FIFOTable
+             , ets_lru_table  := LRUTable
+             , ets_main_table := MainTable} = sys:get_state(Pid),
             ?assertEqual(a, ets:first(MetaTable)),
             ?assertEqual(a, erlang:element(2, ets:first(TTLTable))),
             ?assertEqual(a, erlang:element(2, ets:first(LRUTable))),
@@ -1136,12 +1147,11 @@ gen_rets_test_() ->
                                              {persistence, aof}]),
             ?assertEqual(true, gen_rets:insert(Pid, [{a, v1}, {a, v2}], {sec, 10})),
             ?assertEqual(true, gen_rets:delete_all_objects(Pid)),
-            ServerState = sys:get_state(Pid),
-            MainTable = maps:get(ets_main_table, ServerState),
-            MetaTable = maps:get(ets_meta_table, ServerState),
-            TTLTable  = maps:get(ets_ttl_table , ServerState),
-            FIFOTable = maps:get(ets_fifo_table, ServerState),
-            LRUTable  = maps:get(ets_lru_table , ServerState),
+            #{ ets_main_table := MainTable
+             , ets_meta_table := MetaTable
+             , ets_ttl_table  := TTLTable
+             , ets_fifo_table := FIFOTable
+             , ets_lru_table  := LRUTable} = sys:get_state(Pid),
             ?assertEqual([], ets:tab2list(MainTable)),
             ?assertEqual([], ets:tab2list(MetaTable)),
             ?assertEqual([], ets:tab2list(TTLTable)),
